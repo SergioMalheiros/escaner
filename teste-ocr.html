@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Teste de leitura — Simplificando as Entregas</title>
+<style>
+  :root {
+    --ink: #1B2620; --paper: #EAE6D6; --paper-light: #F5F2E7; --paper-deep: #DDD8C2;
+    --accent: #DB9A34; --accent-deep: #8F5B14; --line: #CBC5AA;
+    --ok: #4C7A5E; --alert: #AA4530;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--paper); color:var(--ink); font-family:system-ui,-apple-system,sans-serif;
+         font-size:15px; line-height:1.5; padding:14px; max-width:640px; margin:0 auto; }
+  h1 { font-size:19px; margin:0 0 2px; }
+  .sub { font-size:13px; opacity:.7; margin:0 0 16px; }
+  .card { background:var(--paper-light); border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:12px; }
+  label { display:block; font-size:13px; font-weight:600; margin-bottom:5px; }
+  input[type=file] { width:100%; font-size:14px; }
+  input[type=range] { width:100%; }
+  select, input[type=number] { font-size:14px; padding:7px; border-radius:7px; border:1px solid var(--line);
+                               background:var(--paper-light); color:var(--ink); font-family:inherit; }
+  button { width:100%; padding:13px; border-radius:10px; font-weight:600; font-size:15px; border:none;
+           background:var(--ink); color:var(--paper-light); font-family:inherit; }
+  button:disabled { opacity:.4; }
+  button.sec { background:transparent; border:1px solid var(--line); color:var(--ink); font-weight:500; }
+  .row { display:flex; gap:10px; align-items:center; }
+  .row > * { flex:1; }
+  .grade { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .mini { font-size:12px; opacity:.65; }
+  #previa { width:100%; border:1px solid var(--line); border-radius:8px; background:var(--paper-deep); display:block; }
+  #barra { height:8px; background:var(--paper-deep); border-radius:99px; overflow:hidden; margin:8px 0 4px; }
+  #barra > i { display:block; height:100%; width:0; background:var(--accent); transition:width .2s; }
+  #status { font-size:13px; font-weight:600; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td { padding:5px 0; border-bottom:1px solid var(--line); }
+  td:last-child { text-align:right; font-weight:700; font-variant-numeric:tabular-nums; }
+  textarea { width:100%; min-height:180px; font-family:ui-monospace,monospace; font-size:11px;
+             padding:10px; border-radius:8px; border:1px solid var(--line); background:var(--paper-light); color:var(--ink); }
+  .aviso { background:#F1DCD4; border:1px solid var(--alert); color:var(--alert);
+           border-radius:8px; padding:9px; font-size:12.5px; font-weight:600; margin-top:8px; }
+  .bom { color:var(--ok); font-weight:700; }
+</style>
+</head>
+<body>
+
+<h1>Teste de leitura da lista</h1>
+<p class="sub">Página separada, só pra medir. Não mexe no app nem salva nada.</p>
+
+<div class="card">
+  <label for="arq">1. Vídeo da lista (gravação de tela)</label>
+  <input type="file" id="arq" accept="video/*" />
+  <p class="mini" id="infoVideo" style="margin:8px 0 0"></p>
+</div>
+
+<div class="card" id="cardCorte" hidden>
+  <label>2. Recorte — deixe só a coluna de texto, sem os ícones da direita</label>
+  <canvas id="previa"></canvas>
+  <div class="grade" style="margin-top:10px">
+    <div><span class="mini">topo <b id="vTopo">18</b>%</span><input type="range" id="topo" min="0" max="40" value="18"></div>
+    <div><span class="mini">base <b id="vBase">4</b>%</span><input type="range" id="base" min="0" max="30" value="4"></div>
+    <div><span class="mini">esquerda <b id="vEsq">2</b>%</span><input type="range" id="esq" min="0" max="30" value="2"></div>
+    <div><span class="mini">direita <b id="vDir">24</b>%</span><input type="range" id="dir" min="0" max="50" value="24"></div>
+  </div>
+</div>
+
+<div class="card" id="cardOpc" hidden>
+  <label>3. Opções</label>
+  <div class="row">
+    <div>
+      <span class="mini">leitores em paralelo</span>
+      <select id="workers"></select>
+    </div>
+    <div>
+      <span class="mini">frames por segundo</span>
+      <select id="fps">
+        <option value="2">2</option>
+        <option value="3" selected>3</option>
+        <option value="4">4</option>
+      </select>
+    </div>
+  </div>
+  <button id="ir" style="margin-top:12px">Analisar o vídeo</button>
+</div>
+
+<div class="card" id="cardProg" hidden>
+  <div id="status">…</div>
+  <div id="barra"><i></i></div>
+  <p class="mini" id="detalhe"></p>
+</div>
+
+<div class="card" id="cardRes" hidden>
+  <label>Resultado</label>
+  <table id="tabela"></table>
+  <div id="avisos"></div>
+  <label style="margin-top:14px">Lista no formato do app</label>
+  <textarea id="saida" readonly></textarea>
+  <div class="row" style="margin-top:10px">
+    <button class="sec" id="copiar">Copiar</button>
+    <button class="sec" id="baixar">Baixar .txt</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var LARGURA_ALVO = 900;   // largura do recorte entregue ao leitor
+  var LIM_PARADO   = 1.6;   // diferenca abaixo disso = rolagem parada (frame nitido)
+  var LIM_MUDOU    = 3.0;   // diferenca acima disso = conteudo novo na tela
+
+  var video = document.createElement("video");
+  video.muted = true; video.playsInline = true; video.preload = "auto";
+
+  var previa = document.getElementById("previa");
+  var arquivo = null, duracao = 0, larguraV = 0, alturaV = 0;
+
+  var el = function (id) { return document.getElementById(id); };
+
+  // ---------- selecao de nucleos ----------
+  (function () {
+    var n = navigator.hardwareConcurrency || 4;
+    var sel = el("workers");
+    for (var i = 1; i <= Math.min(n, 8); i++) {
+      var o = document.createElement("option");
+      o.value = i; o.textContent = i;
+      if (i === Math.max(1, Math.min(4, n - 1))) o.selected = true;
+      sel.appendChild(o);
+    }
+  })();
+
+  // ---------- carregar video ----------
+  el("arq").onchange = function (e) {
+    arquivo = e.target.files[0];
+    if (!arquivo) return;
+    video.src = URL.createObjectURL(arquivo);
+    video.onloadedmetadata = function () {
+      duracao = video.duration; larguraV = video.videoWidth; alturaV = video.videoHeight;
+      el("infoVideo").textContent = larguraV + "x" + alturaV + " · " +
+        duracao.toFixed(1) + "s · " + (arquivo.size / 1048576).toFixed(1) + " MB";
+      el("cardCorte").hidden = false; el("cardOpc").hidden = false;
+      video.currentTime = Math.min(2, duracao / 2);
+    };
+    video.onseeked = desenharPrevia;
+  };
+
+  ["topo", "base", "esq", "dir"].forEach(function (id) {
+    el(id).oninput = function () {
+      el("v" + id.charAt(0).toUpperCase() + id.slice(1)).textContent = el(id).value;
+      desenharPrevia();
+    };
+  });
+
+  function corte() {
+    var t = +el("topo").value / 100, b = +el("base").value / 100;
+    var e = +el("esq").value / 100,  d = +el("dir").value / 100;
+    return { x: Math.round(larguraV * e), y: Math.round(alturaV * t),
+             w: Math.round(larguraV * (1 - e - d)), h: Math.round(alturaV * (1 - t - b)) };
+  }
+
+  function desenharPrevia() {
+    if (!larguraV) return;
+    var c = corte();
+    var esc = Math.min(1, 320 / c.w);
+    previa.width = Math.round(c.w * esc); previa.height = Math.round(c.h * esc);
+    previa.getContext("2d").drawImage(video, c.x, c.y, c.w, c.h, 0, 0, previa.width, previa.height);
+  }
+
+  // ---------- captura de um instante ----------
+  var cvGrande = document.createElement("canvas");
+  var cvPeq    = document.createElement("canvas");
+  cvPeq.width = 90; cvPeq.height = 200;
+
+  function irPara(t) {
+    return new Promise(function (res) {
+      var f = function () { video.removeEventListener("seeked", f); res(); };
+      video.addEventListener("seeked", f);
+      video.currentTime = Math.min(t, duracao - 0.01);
+    });
+  }
+
+  function capturar(paraLeitura) {
+    var c = corte();
+    if (paraLeitura) {
+      var esc = LARGURA_ALVO / c.w;
+      cvGrande.width = Math.round(c.w * esc); cvGrande.height = Math.round(c.h * esc);
+      var g = cvGrande.getContext("2d", { willReadFrequently: false });
+      g.drawImage(video, c.x, c.y, c.w, c.h, 0, 0, cvGrande.width, cvGrande.height);
+      // cinza aumenta o contraste do texto e ajuda o leitor
+      var d = g.getImageData(0, 0, cvGrande.width, cvGrande.height), p = d.data;
+      for (var i = 0; i < p.length; i += 4) {
+        var v = (p[i] * 0.299 + p[i + 1] * 0.587 + p[i + 2] * 0.114) | 0;
+        p[i] = p[i + 1] = p[i + 2] = v;
+      }
+      g.putImageData(d, 0, 0);
+      return cvGrande;
+    }
+    var q = cvPeq.getContext("2d", { willReadFrequently: true });
+    q.drawImage(video, c.x, c.y, c.w, c.h, 0, 0, cvPeq.width, cvPeq.height);
+    return q.getImageData(0, 0, cvPeq.width, cvPeq.height).data;
+  }
+
+  function diferenca(a, b) {
+    var s = 0, n = 0;
+    for (var i = 0; i < a.length; i += 16) { s += Math.abs(a[i] - b[i]); n++; }
+    return s / n;
+  }
+
+  // ---------- passada 1: escolher os instantes que valem leitura ----------
+  async function escolherInstantes(fps) {
+    var passo = 1 / fps, marcas = [], anterior = null, anteriorT = 0, ultimoGuardado = null, total = 0;
+    for (var t = 0; t < duracao; t += passo) {
+      await irPara(t);
+      var m = capturar(false).slice();
+      total++;
+      if (anterior) {
+        var parado = diferenca(anterior, m) < LIM_PARADO;
+        if (parado && (!ultimoGuardado || diferenca(anterior, ultimoGuardado) > LIM_MUDOU)) {
+          marcas.push(anteriorT);
+          ultimoGuardado = anterior;
+        }
+      }
+      anterior = m; anteriorT = t;
+      progresso(t / duracao, "Varrendo o vídeo", marcas.length + " telas úteis até agora");
+    }
+    if (anterior && (!ultimoGuardado || diferenca(anterior, ultimoGuardado) > LIM_MUDOU)) marcas.push(anteriorT);
+    return { marcas: marcas, total: total };
+  }
+
+  // ---------- interpretacao do texto ----------
+  var COMPL = "(?:apt?o?|apart(?:amento)?|casa|cs|loja|lj|bloco|bl|sala|sl|andar|and|quadra|qd|lote|lt|fundos|sobrado)";
+  var TIPO  = "(?:rua|avenida|av\\.?|travessa|trav\\.?|estrada|est\\.?|pra[cç]a|alameda|al\\.?|largo|rodovia|r\\.)";
+  var RUIDO = /(navega|telefone|whats|assinar|roteiriza|entrega pendente|dentro de|filtro|n[uú]mero [uú]nico|inserir|procurar|transfer|urgente)/i;
+  var DATA  = /20\d\d-\d\d-\d\d/;
+  var CODIGO = /\b(\d{15})\b/;
+  var MINUSC = { e:1, de:1, da:1, do:1, dos:1, das:1, a:1, o:1 };
+
+  function titulo(s) {
+    return s.split(/\s+/).map(function (p, i) {
+      var pl = p.toLowerCase();
+      return (i > 0 && MINUSC[pl]) ? pl : pl.charAt(0).toUpperCase() + pl.slice(1);
+    }).join(" ");
+  }
+  function semAcento(s) { return s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase(); }
+
+  function limpar(t) {
+    t = t.replace(/\s+/g, " ").trim();
+    t = t.replace(/\bICARAI\b.*$/i, "").replace(/\bNiter[oó]i\b.*$/i, "");
+    t = t.replace(/\b\d{8}\b\s*$/, "");
+    // o complemento sai ANTES de procurar o numero da casa, senao
+    // "BARROS 71 APT 2102" entrega 2102, que e o apartamento
+    t = t.replace(new RegExp("\\s*\\b" + COMPL + "\\.?\\s*n?[º°]?\\s*\\d+[A-Za-z]?\\b", "gi"), " ");
+    t = t.replace(/\s*(?:apt?o?|apart(?:amento)?|casa|loja|bloco|sala)\.?\s*n?[º°]?\s*\d+[A-Za-z]?\b/gi, " ");
+    t = t.replace(new RegExp("\\b" + COMPL + "\\b", "gi"), " ");
+    return t.replace(/\s+/g, " ").replace(/^[\s;,-]+|[\s;,-]+$/g, "");
+  }
+
+  function viasNums(end, conhecidas) {
+    // a J&T repete o endereco dentro do proprio campo: sao duas leituras
+    // independentes do mesmo numero num frame so
+    var re = new RegExp("\\b(" + TIPO + ")\\s+((?:(?!\\b" + COMPL + "\\b)[^;,\\d\\n]){2,60}?)[\\s;,-]+(\\d{1,5})\\b", "gi");
+    var m, out = [];
+    while ((m = re.exec(end)) !== null) {
+      var tp = m[1].replace(/\.$/, "").toLowerCase();
+      tp = ({ r:"rua", av:"avenida", al:"alameda", est:"estrada", trav:"travessa" })[tp] || tp;
+      var nm = m[2].replace(/[\s-]*lado\s+(?:[ií]mpar|par)\b.*$/i, "").replace(/\s+/g, " ").replace(/^[\s;,-]+|[\s;,-]+$/g, "");
+      out.push([titulo(tp) + " " + titulo(nm), m[3]]);
+    }
+    if (out.length) return out;
+    for (var i = 0; i < conhecidas.length; i++) {
+      var miolo = semAcento(conhecidas[i].replace(new RegExp("^" + TIPO + "\\s+", "i"), ""));
+      var pos = semAcento(end).indexOf(miolo);
+      if (pos >= 0) {
+        var mn = end.slice(pos + miolo.length).match(new RegExp("^[\\s;,-]*(?!\\b" + COMPL + "\\b)(\\d{1,5})\\b", "i"));
+        if (mn) return [[conhecidas[i], mn[1]]];
+      }
+    }
+    return [];
+  }
+
+  function coletar(textos) {
+    var brutos = {};
+    textos.forEach(function (txt) {
+      var linhas = txt.split("\n").map(function (l) { return l.replace(/\s+$/, ""); });
+      for (var i = 0; i < linhas.length; i++) {
+        var mc = linhas[i].match(CODIGO);
+        if (!mc) continue;
+        var cod = mc[1];
+        if (!brutos[cod]) brutos[cod] = { nome: [], end: [] };
+        var j = i + 1, nome = null;
+        while (j < linhas.length) {
+          var s = linhas[j].trim();
+          if (s && !RUIDO.test(s) && !DATA.test(s) && !CODIGO.test(s)) { nome = s; break; }
+          j++;
+        }
+        var partes = [], k = nome ? j + 1 : i + 1;
+        while (k < linhas.length) {
+          var s2 = linhas[k].trim();
+          if (!s2) { k++; continue; }
+          if (DATA.test(s2) || CODIGO.test(s2)) break;
+          var corte2 = s2.split(/(navega|telefone|whats|assinar)/i)[0].trim();
+          if (corte2) partes.push(corte2);
+          if (partes.length >= 3) break;
+          k++;
+        }
+        var end = limpar(partes.join(" "));
+        if (nome) brutos[cod].nome.push(nome);
+        if (end)  brutos[cod].end.push(end);
+        i = Math.max(k, i + 1) - 1;
+      }
+    });
+    return brutos;
+  }
+
+  function votar(xs) {
+    if (!xs.length) return [null, {}];
+    var c = {}; xs.forEach(function (x) { c[x] = (c[x] || 0) + 1; });
+    var melhor = null, n = -1;
+    Object.keys(c).forEach(function (k) { if (c[k] > n) { n = c[k]; melhor = k; } });
+    return [melhor, c];
+  }
+
+  function interpretar(textos) {
+    var brutos = coletar(textos);
+    var contRuas = {};
+    Object.keys(brutos).forEach(function (cod) {
+      brutos[cod].end.forEach(function (e) {
+        viasNums(e, []).forEach(function (par) { contRuas[par[0]] = (contRuas[par[0]] || 0) + 1; });
+      });
+    });
+    var ruasOrd = Object.keys(contRuas).sort(function (a, b) { return contRuas[b] - contRuas[a]; });
+    var somaR = ruasOrd.reduce(function (s, r) { return s + contRuas[r]; }, 0);
+    var conhecidas = ruasOrd.filter(function (r) { return contRuas[r] >= 2; });
+    var dominantes = ruasOrd.filter(function (r) { return contRuas[r] >= Math.max(3, 0.15 * somaR); });
+
+    function canonizar(rua) {
+      if (!rua || dominantes.indexOf(rua) >= 0) return rua;
+      var a = semAcento(rua);
+      for (var i = 0; i < dominantes.length; i++) {
+        var d = semAcento(dominantes[i]);
+        if (a.indexOf(d) === 0 || d.indexOf(a) === 0) return dominantes[i];
+      }
+      return rua;
+    }
+
+    var registros = [];
+    Object.keys(brutos).forEach(function (cod) {
+      var L = brutos[cod], ruas = [], nums = [];
+      L.end.forEach(function (e) {
+        viasNums(e, conhecidas).forEach(function (par) {
+          if (par[0]) ruas.push(canonizar(par[0]));
+          if (par[1]) nums.push(par[1]);
+        });
+      });
+      var vn = votar(L.nome), vr = votar(ruas), vu = votar(nums);
+      registros.push({
+        codigo: cod, nome: vn[0], rua: vr[0], numero: vu[0],
+        divergiu: Object.keys(vn[1]).length > 1 || Object.keys(vr[1]).length > 1 || Object.keys(vu[1]).length > 1,
+        opcoesNum: vu[1]
+      });
+    });
+    return registros;
+  }
+
+  // ---------- progresso ----------
+  function progresso(frac, titulo, detalhe) {
+    el("cardProg").hidden = false;
+    el("barra").firstElementChild.style.width = Math.round(frac * 100) + "%";
+    el("status").textContent = titulo;
+    el("detalhe").textContent = detalhe || "";
+  }
+
+  // ---------- fluxo principal ----------
+  el("ir").onclick = async function () {
+    el("ir").disabled = true;
+    el("cardRes").hidden = true;
+    var fps = +el("fps").value, nW = +el("workers").value;
+    var t0 = performance.now();
+
+    var sel = await escolherInstantes(fps);
+    var tVarredura = performance.now() - t0;
+
+    progresso(0, "Preparando o leitor", "carregando português…");
+    var t1 = performance.now();
+    var sched = Tesseract.createScheduler();
+    for (var i = 0; i < nW; i++) {
+      var w = await Tesseract.createWorker("por");
+      await w.setParameters({ tessedit_pageseg_mode: "6" });
+      sched.addWorker(w);
+    }
+    var tPreparo = performance.now() - t1;
+
+    var t2 = performance.now(), prontos = 0, textos = [];
+    for (var k = 0; k < sel.marcas.length; k++) {
+      await irPara(sel.marcas[k]);
+      var cv = capturar(true);
+      var blob = await new Promise(function (r) { cvGrande.toBlob(r, "image/png"); });
+      sched.addJob("recognize", blob).then(function (res) {
+        textos.push(res.data.text);
+        prontos++;
+        progresso(prontos / sel.marcas.length, "Lendo as telas", prontos + " de " + sel.marcas.length);
+      });
+    }
+    while (prontos < sel.marcas.length) { await new Promise(function (r) { setTimeout(r, 120); }); }
+    var tLeitura = performance.now() - t2;
+    await sched.terminate();
+
+    var t3 = performance.now();
+    var regs = interpretar(textos);
+    var tInterp = performance.now() - t3;
+    var tTotal = performance.now() - t0;
+
+    mostrar(regs, sel, { varredura: tVarredura, preparo: tPreparo, leitura: tLeitura,
+                         interp: tInterp, total: tTotal, nW: nW });
+    el("ir").disabled = false;
+    el("cardProg").hidden = true;
+  };
+
+  function mostrar(regs, sel, tempos) {
+    var completos = regs.filter(function (r) { return r.rua && r.numero && r.nome; });
+    var faltando  = regs.filter(function (r) { return !(r.rua && r.numero && r.nome); });
+    var divergentes = completos.filter(function (r) { return r.divergiu; });
+
+    var seg = function (ms) { return (ms / 1000).toFixed(1) + "s"; };
+    var linhas = [
+      ["Telas lidas", sel.marcas.length + " de " + sel.total],
+      ["Pacotes encontrados", regs.length],
+      ["Completos", completos.length],
+      ["Faltando algum campo", faltando.length],
+      ["Divergência entre telas", divergentes.length],
+      ["— Varrer o vídeo", seg(tempos.varredura)],
+      ["— Preparar o leitor", seg(tempos.preparo)],
+      ["— Ler (" + tempos.nW + " em paralelo)", seg(tempos.leitura)],
+      ["— Interpretar", seg(tempos.interp)],
+      ["Tempo total", seg(tempos.total)],
+      ["Por tela lida", sel.marcas.length ? (tempos.leitura / sel.marcas.length / 1000).toFixed(2) + "s" : "—"]
+    ];
+    el("tabela").innerHTML = linhas.map(function (l) {
+      return "<tr><td>" + l[0] + "</td><td>" + l[1] + "</td></tr>";
+    }).join("");
+
+    var av = "";
+    if (faltando.length) {
+      av += '<div class="aviso">' + faltando.length + " pacote(s) sem endereço completo — provavelmente cortados na borda da tela. Códigos: " +
+            faltando.map(function (r) { return r.codigo; }).join(", ") + "</div>";
+    }
+    if (divergentes.length) {
+      av += '<div class="aviso" style="background:#F7EEDD;border-color:var(--accent-deep);color:var(--accent-deep)">' +
+            divergentes.length + " pacote(s) com leitura divergente (o voto decidiu): " +
+            divergentes.map(function (r) {
+              return r.codigo + " → " + r.numero + " " + JSON.stringify(r.opcoesNum);
+            }).join(" · ") + "</div>";
+    }
+    if (!av) av = '<p class="bom" style="margin:8px 0 0">Nenhum problema: todos os pacotes saíram completos.</p>';
+    el("avisos").innerHTML = av;
+
+    completos.sort(function (a, b) {
+      return a.rua === b.rua ? (+a.numero) - (+b.numero) : a.rua.localeCompare(b.rua);
+    });
+    el("saida").value = completos.map(function (r) {
+      return r.rua + ", " + r.numero + ", " + r.nome + ", " + r.codigo;
+    }).join("\n");
+    el("cardRes").hidden = false;
+  }
+
+  el("copiar").onclick = function () {
+    el("saida").select();
+    navigator.clipboard.writeText(el("saida").value).then(function () {
+      el("copiar").textContent = "Copiado";
+      setTimeout(function () { el("copiar").textContent = "Copiar"; }, 1500);
+    });
+  };
+  el("baixar").onclick = function () {
+    var b = new Blob([el("saida").value], { type: "text/plain" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(b); a.download = "lista-do-dia.txt"; a.click();
+  };
+})();
+</script>
+</body>
+</html>
