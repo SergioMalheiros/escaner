@@ -364,6 +364,79 @@
     return registros;
   }
 
+  // ---------- leitura em lote, com ordem preservada ----------
+  var CODIGO_G = /\b(\d{15})\b/g;
+  function codigosDe(txt) {
+    var s = {}, m; CODIGO_G.lastIndex = 0;
+    while ((m = CODIGO_G.exec(txt)) !== null) s[m[1]] = 1;
+    return s;
+  }
+  function compartilham(a, b) {
+    for (var k in a) if (b[k]) return true;
+    return false;
+  }
+
+  var lidosTotal = 0, alvoTotal = 0;
+  async function lerLote(sched, tempos) {
+    var jobs = [], out = [];
+    alvoTotal += tempos.length;
+    for (var i = 0; i < tempos.length; i++) {
+      await irPara(tempos[i]);
+      capturar(true);
+      var blob = await new Promise(function (r) { cvGrande.toBlob(r, "image/png"); });
+      (function (t) {
+        jobs.push(sched.addJob("recognize", blob).then(function (res) {
+          out.push({ t: t, texto: res.data.text, codigos: codigosDe(res.data.text) });
+          lidosTotal++;
+          progresso(lidosTotal / alvoTotal, "Lendo as telas", lidosTotal + " de " + alvoTotal);
+        }));
+      })(tempos[i]);
+    }
+    await Promise.all(jobs);
+    return out;
+  }
+
+  // Duas telas seguidas SEMPRE tem que ter pelo menos um pacote em comum: a
+  // rolagem e continua. Se nao tem, pulou conteudo — e um pacote inteiro pode
+  // ter sumido sem ninguem perceber. Nesse caso le o meio do caminho.
+  async function taparBuracos(sched, lidos) {
+    for (var rodada = 0; rodada < 4; rodada++) {
+      var meios = [];
+      for (var i = 0; i + 1 < lidos.length; i++) {
+        var dt = lidos[i + 1].t - lidos[i].t;
+        if (dt > 0.12 && !compartilham(lidos[i].codigos, lidos[i + 1].codigos)) {
+          meios.push((lidos[i].t + lidos[i + 1].t) / 2);
+        }
+      }
+      if (!meios.length) break;
+      progresso(0, "Conferindo se pulou alguma tela", meios.length + " trecho(s) pra revisar");
+      var novos = await lerLote(sched, meios);
+      lidos = lidos.concat(novos).sort(function (a, b) { return a.t - b.t; });
+    }
+    var restantes = 0;
+    for (var j = 0; j + 1 < lidos.length; j++) {
+      if ((lidos[j + 1].t - lidos[j].t) > 0.12 && !compartilham(lidos[j].codigos, lidos[j + 1].codigos)) restantes++;
+    }
+    return { lidos: lidos, buracos: restantes };
+  }
+
+  // total que a propria J&T mostra na aba ("Entrega pendente(122)")
+  async function totalDaAba(sched) {
+    try {
+      await irPara(Math.min(1.5, duracao / 3));
+      var c = corte();
+      if (c.y < 20) return null;
+      var esc = 1000 / larguraV;
+      cvGrande.width = Math.round(larguraV * esc);
+      cvGrande.height = Math.round(c.y * esc);
+      cvGrande.getContext("2d").drawImage(video, 0, 0, larguraV, c.y, 0, 0, cvGrande.width, cvGrande.height);
+      var blob = await new Promise(function (r) { cvGrande.toBlob(r, "image/png"); });
+      var res = await sched.addJob("recognize", blob);
+      var m = res.data.text.match(/pendente\s*[\(\[]?\s*(\d{1,4})/i) || res.data.text.match(/[\(\[]\s*(\d{2,4})\s*[\)\]]/);
+      return m ? +m[1] : null;
+    } catch (e) { return null; }
+  }
+
   // ---------- progresso ----------
   function progresso(frac, titulo, detalhe) {
     el("cardProg").hidden = false;
@@ -392,28 +465,23 @@
     }
     var tPreparo = performance.now() - t1;
 
-    var t2 = performance.now(), prontos = 0, textos = [];
-    for (var k = 0; k < sel.marcas.length; k++) {
-      await irPara(sel.marcas[k]);
-      var cv = capturar(true);
-      var blob = await new Promise(function (r) { cvGrande.toBlob(r, "image/png"); });
-      sched.addJob("recognize", blob).then(function (res) {
-        textos.push(res.data.text);
-        prontos++;
-        progresso(prontos / sel.marcas.length, "Lendo as telas", prontos + " de " + sel.marcas.length);
-      });
-    }
-    while (prontos < sel.marcas.length) { await new Promise(function (r) { setTimeout(r, 120); }); }
+    var t2 = performance.now();
+    lidosTotal = 0; alvoTotal = 0;
+    var esperado = await totalDaAba(sched);
+    var lidos = await lerLote(sched, sel.marcas);
+    lidos.sort(function (a, b) { return a.t - b.t; });
+    var rep = await taparBuracos(sched, lidos);
     var tLeitura = performance.now() - t2;
     await sched.terminate();
 
     var t3 = performance.now();
-    var regs = interpretar(textos);
+    var regs = interpretar(rep.lidos.map(function (x) { return x.texto; }));
     var tInterp = performance.now() - t3;
     var tTotal = performance.now() - t0;
 
-    mostrar(regs, sel, { varredura: tVarredura, preparo: tPreparo, leitura: tLeitura,
-                         interp: tInterp, total: tTotal, nW: nW });
+    mostrar(regs, { marcas: { length: alvoTotal }, total: sel.total },
+            { varredura: tVarredura, preparo: tPreparo, leitura: tLeitura,
+              interp: tInterp, total: tTotal, nW: nW, buracos: rep.buracos, esperado: esperado });
     el("ir").disabled = false;
     el("cardProg").hidden = true;
   };
@@ -426,6 +494,8 @@
     var seg = function (ms) { return (ms / 1000).toFixed(1) + "s"; };
     var linhas = [
       ["Telas lidas", sel.marcas.length + " de " + sel.total],
+      ["Trechos sem continuidade", tempos.buracos],
+      ["Total na aba da J&T", tempos.esperado || "não li"],
       ["Pacotes encontrados", regs.length],
       ["Completos", completos.length],
       ["Faltando algum campo", faltando.length],
@@ -442,6 +512,20 @@
     }).join("");
 
     var av = "";
+    if (tempos.buracos > 0) {
+      av += '<div class="aviso">Atenção: ' + tempos.buracos + " trecho(s) do vídeo sem continuidade entre uma tela e a seguinte. " +
+            "Pode haver pacote que não apareceu inteiro em nenhum momento parado — role mais devagar e regrave.</div>";
+    }
+    if (tempos.esperado) {
+      var dif = tempos.esperado - completos.length;
+      av += '<div class="aviso" style="' + (dif === 0
+              ? 'background:#DEEBE2;border-color:var(--ok);color:var(--ok)'
+              : 'background:#F7EEDD;border-color:var(--accent-deep);color:var(--accent-deep)') + '">' +
+            "A J&amp;T mostra " + tempos.esperado + " na aba e eu montei " + completos.length +
+            (dif === 0 ? " — bate certinho." : " — diferença de " + dif +
+             (dif > 0 ? ". Se o vídeo era da lista inteira, faltou pacote." : ". Sobrou leitura, confira duplicados.")) +
+            "</div>";
+    }
     if (faltando.length) {
       av += '<div class="aviso">' + faltando.length + " pacote(s) sem endereço completo — provavelmente cortados na borda da tela. Códigos: " +
             faltando.map(function (r) { return r.codigo; }).join(", ") + "</div>";
