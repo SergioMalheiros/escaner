@@ -73,14 +73,16 @@
       <select id="workers"></select>
     </div>
     <div>
-      <span class="mini">frames por segundo</span>
-      <select id="fps">
-        <option value="2">2</option>
-        <option value="3" selected>3</option>
-        <option value="4">4</option>
+      <span class="mini">velocidade da varredura</span>
+      <select id="vel">
+        <option value="2">2x</option>
+        <option value="4" selected>4x</option>
+        <option value="6">6x</option>
+        <option value="8">8x</option>
       </select>
     </div>
   </div>
+  <p class="mini" id="dicaNucleos" style="margin:8px 0 0"></p>
   <button id="ir" style="margin-top:12px">Analisar o vídeo</button>
 </div>
 
@@ -121,14 +123,20 @@
 
   // ---------- selecao de nucleos ----------
   (function () {
-    var n = navigator.hardwareConcurrency || 4;
+    // hardwareConcurrency as vezes reporta menos nucleos do que o aparelho tem,
+    // e na primeira medicao isso deixou a leitura rodando com 1 leitor so.
+    // Agora oferece ate 8 sempre, e ja vem em 4.
+    var n = navigator.hardwareConcurrency || 0;
     var sel = el("workers");
-    for (var i = 1; i <= Math.min(n, 8); i++) {
+    for (var i = 1; i <= 8; i++) {
       var o = document.createElement("option");
       o.value = i; o.textContent = i;
-      if (i === Math.max(1, Math.min(4, n - 1))) o.selected = true;
+      if (i === 4) o.selected = true;
       sel.appendChild(o);
     }
+    el("dicaNucleos").textContent = n
+      ? "Este aparelho informa " + n + " núcleo(s). Vale testar 4 e 6 e comparar o tempo de leitura."
+      : "Não deu pra saber quantos núcleos o aparelho tem — teste 2, 4 e 6.";
   })();
 
   // ---------- carregar video ----------
@@ -209,24 +217,69 @@
   }
 
   // ---------- passada 1: escolher os instantes que valem leitura ----------
-  async function escolherInstantes(fps) {
-    var passo = 1 / fps, marcas = [], anterior = null, anteriorT = 0, ultimoGuardado = null, total = 0;
+  // Procurar quadro a quadro com "currentTime = t" custa 1 segundo de espera
+  // por segundo de video: a varredura demorava o tempo inteiro da gravacao.
+  // Tocando o video acelerado e pegando o que a tela apresenta, o mesmo
+  // trabalho sai varias vezes mais rapido.
+  function varrerTocando(velocidade) {
+    return new Promise(function (resolve, reject) {
+      if (!video.requestVideoFrameCallback) return reject(new Error("sem requestVideoFrameCallback"));
+      var marcas = [], anterior = null, anteriorT = 0, ultimo = null, total = 0, encerrado = false;
+
+      function terminar() {
+        if (encerrado) return;
+        encerrado = true;
+        video.pause(); video.playbackRate = 1;
+        if (anterior && (!ultimo || diferenca(anterior, ultimo) > LIM_MUDOU)) marcas.push(anteriorT);
+        resolve({ marcas: marcas, total: total });
+      }
+
+      function passo(agora, meta) {
+        var t = meta.mediaTime;
+        var m = capturar(false).slice();
+        total++;
+        if (anterior) {
+          var parado = diferenca(anterior, m) < LIM_PARADO;
+          if (parado && (!ultimo || diferenca(anterior, ultimo) > LIM_MUDOU)) {
+            marcas.push(anteriorT);
+            ultimo = anterior;
+          }
+        }
+        anterior = m; anteriorT = t;
+        progresso(t / duracao, "Varrendo o vídeo", marcas.length + " telas úteis até agora");
+        if (!video.ended && !encerrado) video.requestVideoFrameCallback(passo);
+        else terminar();
+      }
+
+      video.onended = terminar;
+      video.currentTime = 0;
+      video.playbackRate = velocidade;
+      video.requestVideoFrameCallback(passo);
+      video.play().catch(reject);
+    });
+  }
+
+  // reserva, pra navegador sem requestVideoFrameCallback
+  async function varrerBuscando(fps) {
+    var passo = 1 / fps, marcas = [], anterior = null, anteriorT = 0, ultimo = null, total = 0;
     for (var t = 0; t < duracao; t += passo) {
       await irPara(t);
       var m = capturar(false).slice();
       total++;
       if (anterior) {
         var parado = diferenca(anterior, m) < LIM_PARADO;
-        if (parado && (!ultimoGuardado || diferenca(anterior, ultimoGuardado) > LIM_MUDOU)) {
-          marcas.push(anteriorT);
-          ultimoGuardado = anterior;
-        }
+        if (parado && (!ultimo || diferenca(anterior, ultimo) > LIM_MUDOU)) { marcas.push(anteriorT); ultimo = anterior; }
       }
       anterior = m; anteriorT = t;
       progresso(t / duracao, "Varrendo o vídeo", marcas.length + " telas úteis até agora");
     }
-    if (anterior && (!ultimoGuardado || diferenca(anterior, ultimoGuardado) > LIM_MUDOU)) marcas.push(anteriorT);
+    if (anterior && (!ultimo || diferenca(anterior, ultimo) > LIM_MUDOU)) marcas.push(anteriorT);
     return { marcas: marcas, total: total };
+  }
+
+  async function escolherInstantes(velocidade, fps) {
+    try { return await varrerTocando(velocidade); }
+    catch (e) { return await varrerBuscando(fps); }
   }
 
   // ---------- interpretacao do texto ----------
@@ -404,7 +457,12 @@
       var meios = [];
       for (var i = 0; i + 1 < lidos.length; i++) {
         var dt = lidos[i + 1].t - lidos[i].t;
-        if (dt > 0.12 && !compartilham(lidos[i].codigos, lidos[i + 1].codigos)) {
+        // so faz sentido comparar quando AS DUAS telas leram algum codigo:
+        // uma tela sem codigo nenhum nao compartilha nada com ninguem, e antes
+        // isso virava um "buraco" falso.
+        var temA = Object.keys(lidos[i].codigos).length;
+        var temB = Object.keys(lidos[i + 1].codigos).length;
+        if (dt > 0.12 && temA && temB && !compartilham(lidos[i].codigos, lidos[i + 1].codigos)) {
           meios.push((lidos[i].t + lidos[i + 1].t) / 2);
         }
       }
@@ -415,7 +473,9 @@
     }
     var restantes = 0;
     for (var j = 0; j + 1 < lidos.length; j++) {
-      if ((lidos[j + 1].t - lidos[j].t) > 0.12 && !compartilham(lidos[j].codigos, lidos[j + 1].codigos)) restantes++;
+      if ((lidos[j + 1].t - lidos[j].t) > 0.12 &&
+          Object.keys(lidos[j].codigos).length && Object.keys(lidos[j + 1].codigos).length &&
+          !compartilham(lidos[j].codigos, lidos[j + 1].codigos)) restantes++;
     }
     return { lidos: lidos, buracos: restantes };
   }
@@ -449,10 +509,10 @@
   el("ir").onclick = async function () {
     el("ir").disabled = true;
     el("cardRes").hidden = true;
-    var fps = +el("fps").value, nW = +el("workers").value;
+    var vel = +el("vel").value, nW = +el("workers").value;
     var t0 = performance.now();
 
-    var sel = await escolherInstantes(fps);
+    var sel = await escolherInstantes(vel, 3);
     var tVarredura = performance.now() - t0;
 
     progresso(0, "Preparando o leitor", "carregando português…");
