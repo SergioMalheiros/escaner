@@ -482,15 +482,24 @@
       var novos = await lerLote(sched, meios);
       lidos = lidos.concat(novos).sort(function (a, b) { return a.t - b.t; });
     }
-    var restantes = 0, cegas = 0, maiorVao = 0;
+    var restantes = 0, cegas = 0, maiorVao = 0, vaoEm = 0, vaoParado = false;
     for (var j = 0; j < lidos.length; j++) {
       if (!Object.keys(lidos[j].codigos).length) cegas++;
       if (j + 1 < lidos.length) {
         if ((lidos[j + 1].t - lidos[j].t) > 0.08 && !margemOk(lidos[j].codigos, lidos[j + 1].codigos)) restantes++;
-        maiorVao = Math.max(maiorVao, lidos[j + 1].t - lidos[j].t);
+        var vao = lidos[j + 1].t - lidos[j].t;
+        if (vao > maiorVao) {
+          maiorVao = vao; vaoEm = lidos[j].t;
+          // vao longo com as MESMAS telas dos dois lados = voce so parou de
+          // rolar (inofensivo). Vao longo com conteudo diferente = passou
+          // conteudo rolando, e ai pode ter sumido pacote.
+          vaoParado = quantosEmComum(lidos[j].codigos, lidos[j + 1].codigos) >=
+                      Math.min(Object.keys(lidos[j].codigos).length, Object.keys(lidos[j + 1].codigos).length);
+        }
       }
     }
-    return { lidos: lidos, buracos: restantes, cegas: cegas, maiorVao: maiorVao };
+    return { lidos: lidos, buracos: restantes, cegas: cegas,
+             maiorVao: maiorVao, vaoEm: vaoEm, vaoParado: vaoParado };
   }
 
   // total que a propria J&T mostra na aba ("Entrega pendente(122)")
@@ -556,6 +565,7 @@
             { varredura: tVarredura, preparo: tPreparo, leitura: tLeitura,
               interp: tInterp, total: tTotal, nW: nW, buracos: rep.buracos, esperado: esperado,
               cegas: rep.cegas, maiorVao: rep.maiorVao,
+              vaoEm: rep.vaoEm, vaoParado: rep.vaoParado,
               fim: rep.lidos.length ? rep.lidos[rep.lidos.length - 1].t : 0, duracao: duracao });
     el("ir").disabled = false;
     el("cardProg").hidden = true;
@@ -571,7 +581,8 @@
       ["Telas lidas", sel.marcas.length + " de " + sel.total],
       ["Telas onde não li código nenhum", tempos.cegas],
       ["Trechos de margem curta", tempos.buracos],
-      ["Maior salto entre telas", tempos.maiorVao.toFixed(2) + "s"],
+      ["Maior salto entre telas", tempos.maiorVao.toFixed(2) + "s aos " + tempos.vaoEm.toFixed(0) + "s" +
+        (tempos.vaoParado ? " (parado, inofensivo)" : " (COM conteúdo novo)")],
       ["Última tela lida", tempos.fim.toFixed(1) + "s de " + tempos.duracao.toFixed(1) + "s"],
       ["Total na aba da J&T", tempos.esperado || "não li"],
       ["Pacotes encontrados", regs.length],
@@ -594,6 +605,16 @@
       av += '<div class="aviso">Atenção: ' + tempos.buracos + " trecho(s) com margem curta entre uma tela e a seguinte, " +
             "mesmo depois de reforçar. Pode ter pacote que nunca apareceu inteiro num momento parado — " +
             "role mais devagar e com passos menores.</div>";
+    }
+    var apertados = completos.filter(function (r) {
+      if (!r.disputa || !r.disputa.numero) return false;
+      var v = Object.keys(r.disputa.numero).map(function (k) { return r.disputa.numero[k]; })
+                    .sort(function (a, b) { return b - a; });
+      return v.length > 1 && (v[0] - v[1]) <= 1;
+    }).length;
+    if (apertados) {
+      av += '<div class="aviso">' + apertados + " pacote(s) tiveram o número da casa decidido por " +
+            "um voto de diferença. É pouca margem pra confiar — confira esses antes de sair pra rua.</div>";
     }
     var so1 = completos.filter(function (r) { return r.leituras <= 1; }).length;
     if (so1) {
