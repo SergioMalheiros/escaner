@@ -60,6 +60,7 @@
     <button id="addCap">Adicionar esta captura</button>
     <button class="sec" id="limparCap">Limpar tudo</button>
   </div>
+  <div id="recuperado" class="aviso" style="background:#DEEBE2;border-color:var(--ok);color:var(--ok)" hidden></div>
   <div id="listaCap" style="margin-top:10px"></div>
   <div class="row" style="margin-top:10px">
     <div style="flex:0 0 auto">
@@ -126,7 +127,6 @@
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <script>
 (function () {
   "use strict";
@@ -626,8 +626,25 @@
   }
 
   // ---------- fluxo principal ----------
+  // carregado so na hora: manter o leitor de imagem na memoria o tempo todo
+  // engorda a aba e aumenta a chance de o Android descarta-la enquanto voce
+  // esta no Lens buscando a proxima captura
+  function carregarLeitor() {
+    return new Promise(function (res, rej) {
+      if (window.Tesseract) return res();
+      var t = document.createElement("script");
+      t.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+      t.onload = function () { res(); };
+      t.onerror = function () { rej(new Error("não consegui carregar o leitor")); };
+      document.head.appendChild(t);
+    });
+  }
+
   el("ir").onclick = async function () {
     el("ir").disabled = true;
+    progresso(0, "Carregando o leitor de imagem", "só na primeira vez");
+    try { await carregarLeitor(); }
+    catch (e) { el("status").textContent = "Sem internet pra carregar o leitor de imagem."; el("ir").disabled = false; return; }
     el("cardRes").hidden = true;
     var vel = +el("vel").value, nW = +el("workers").value;
     var t0 = performance.now();
@@ -762,6 +779,36 @@
   // proposito: capturas vizinhas TEM que compartilhar codigo.
   var capturas = [];
 
+  // O fluxo obriga a sair do navegador pra buscar a proxima captura no Lens, e
+  // o Android descarta a aba enquanto voce esta fora — levando junto tudo que
+  // ja tinha sido colado. Entao cada captura e gravada no proprio aparelho na
+  // hora, e volta sozinha quando a pagina recarrega.
+  var CHAVE = "entregas.capturas.v1";
+  function guardar() {
+    try {
+      localStorage.setItem(CHAVE, JSON.stringify({
+        capturas: capturas.map(function (c) { return c.texto; }),
+        esperado: el("esperadoMan").value,
+        quando: Date.now()
+      }));
+    } catch (e) { /* aba anonima ou armazenamento cheio: segue sem guardar */ }
+  }
+  function recuperar() {
+    try {
+      var bruto = localStorage.getItem(CHAVE);
+      if (!bruto) return;
+      var d = JSON.parse(bruto);
+      if (!d || !d.capturas || !d.capturas.length) return;
+      capturas = d.capturas.map(function (t) { return { texto: t, codigos: codigosDe(semConfusos(t)) }; });
+      if (d.esperado) el("esperadoMan").value = d.esperado;
+      pintarCapturas();
+      var h = Math.round((Date.now() - (d.quando || Date.now())) / 60000);
+      el("recuperado").innerHTML = "Recuperei " + capturas.length + " captura(s) que você já tinha colado" +
+        (h >= 1 ? " (há " + h + " min)" : "") + ". Pode continuar de onde parou.";
+      el("recuperado").hidden = false;
+    } catch (e) { /* nada guardado ou ilegivel */ }
+  }
+
   function pintarCapturas() {
     if (!capturas.length) { el("listaCap").innerHTML = ""; return; }
     var h = "";
@@ -786,9 +833,19 @@
          "</b> pacotes distintos somando tudo</p>";
     el("listaCap").innerHTML = h;
     Array.prototype.forEach.call(el("listaCap").querySelectorAll("[data-rm]"), function (b) {
-      b.onclick = function () { capturas.splice(+b.getAttribute("data-rm"), 1); pintarCapturas(); };
+      b.onclick = function () { capturas.splice(+b.getAttribute("data-rm"), 1); pintarCapturas(); guardar(); };
     });
   }
+
+  // ate o texto ainda nao adicionado e guardado, pra nao perder uma colagem
+  // no meio do caminho
+  el("colado").oninput = function () {
+    try { localStorage.setItem(CHAVE + ".rascunho", el("colado").value); } catch (e) {}
+  };
+  try {
+    var rasc = localStorage.getItem(CHAVE + ".rascunho");
+    if (rasc && !el("colado").value) el("colado").value = rasc;
+  } catch (e) {}
 
   el("addCap").onclick = function () {
     var txt = el("colado").value;
@@ -801,14 +858,21 @@
     }
     capturas.push({ texto: txt, codigos: cods });
     el("colado").value = "";
+    try { localStorage.removeItem(CHAVE + ".rascunho"); } catch (e) {}
     el("colado").focus();
     pintarCapturas();
+    guardar();
+    el("recuperado").hidden = true;
   };
 
   el("limparCap").onclick = function () {
     capturas = []; el("colado").value = ""; pintarCapturas();
+    try { localStorage.removeItem(CHAVE); } catch (e) {}
+    el("recuperado").hidden = true;
     el("cardRes").hidden = true;
   };
+
+  el("esperadoMan").oninput = guardar;
 
   el("montar").onclick = function () {
     var pendente = el("colado").value.trim();
@@ -878,6 +942,8 @@
     el("cardRes").hidden = false;
     el("cardRes").scrollIntoView({ behavior: "smooth", block: "start" });
   };
+
+  recuperar();
 
   el("copiar").onclick = function () {
     el("saida").select();
