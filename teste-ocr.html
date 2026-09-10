@@ -307,7 +307,6 @@
   // ---------- interpretacao do texto ----------
   var COMPL = "(?:apt?o?|apart(?:amento)?|casa|cs|loja|lj|bloco|bl|sala|sl|andar|and|quadra|qd|lote|lt|fundos|sobrado)";
   var TIPO  = "(?:rua|avenida|av\\.?|travessa|trav\\.?|estrada|est\\.?|pra[cç]a|alameda|al\\.?|largo|rodovia|r\\.)";
-  var RUIDO = /(navega|telefone|whats|assinar|roteiriza|entrega pendente|dentro de|filtro|n[uú]mero [uú]nico|inserir|procurar|transfer|urgente)/i;
   var DATA  = /20\d\d-\d\d-\d\d/;
   var CODIGO = /\b(\d{15})\b/;
   var MINUSC = { e:1, de:1, da:1, do:1, dos:1, das:1, a:1, o:1 };
@@ -331,27 +330,71 @@
     return s.replace(/[Ͱ-ϿЀ-ӿ]/g, function (c) { return CONFUSOS[c] || c; });
   }
 
+  // O Lens erra a grafia do rotulo dos proprios botoes: "novegapão", "telekone",
+  // "avegação", "navegroo". Listar variante por variante nunca acaba — comparar
+  // por semelhanca pega todas, inclusive as que ainda nao apareceram.
+  var RUIDO_BASE = ["navegacao", "telefone", "whatsapp", "assinar", "roteirizacao"];
+  function distancia(a, b) {
+    if (Math.abs(a.length - b.length) > 3) return 99;
+    var ant = [], i, j;
+    for (j = 0; j <= b.length; j++) ant[j] = j;
+    for (i = 1; i <= a.length; i++) {
+      var atual = [i];
+      for (j = 1; j <= b.length; j++) {
+        atual[j] = Math.min(ant[j] + 1, atual[j - 1] + 1, ant[j - 1] + (a.charAt(i - 1) !== b.charAt(j - 1) ? 1 : 0));
+      }
+      ant = atual;
+    }
+    return ant[b.length];
+  }
+  function ehRuido(token) {
+    var t = semAcento(token).replace(/[^a-z]/g, "");
+    if (t.length < 5) return false;
+    for (var i = 0; i < RUIDO_BASE.length; i++) {
+      var base = RUIDO_BASE[i];
+      if (distancia(t, base) <= Math.max(2, Math.floor(base.length / 4))) return true;
+    }
+    return false;
+  }
+  function tirarRuido(txt) {
+    return txt.split(/\s+/).map(function (tk) { return ehRuido(tk) ? "" : tk; }).join(" ").trim();
+  }
+
+  // A faixa de numeracao dos Correios ("de 145 a 191 - lado ímpar") vem ANTES
+  // do numero da casa. Pegar o primeiro numero entregava 145, o comeco da
+  // faixa, sem acusar nada — numero errado com cara de certo.
+  var FAIXA = /\bde\s*\d{1,5}\s*a\s*\d{1,5}\b/gi;
+  var LADO  = /[\s-]*lado\s*[íi]?mpar\b|[\s-]*lado\s*par\b|[\s-]*\b[íi]mpar\b/gi;
+
+  var teveFaixa = false;
   function limpar(t) {
-    t = t.replace(/\s+/g, " ").trim();
-    t = t.replace(/\bICARAI\b.*$/i, "").replace(/\bNiter[oó]i\b.*$/i, "");
-    t = t.replace(/\b\d{8}\b\s*$/, "");
-    // o complemento sai ANTES de procurar o numero da casa, senao
-    // "BARROS 71 APT 2102" entrega 2102, que e o apartamento
+    t = tirarRuido(t);
+    t = t.replace(/\(\s*\d\s*\)/g, " ");           // o icone do botao vira "(1)"
+    t = t.replace(/\bNiter[oó]i\b[\s\S]*$/i, "");
+    // ICARAI as vezes vem na FRENTE ("Icarai, Rua Mariz e Barros: 491"), nao so
+    // no fim como bairro. Cortar a partir dele apagava o endereco inteiro.
+    t = t.replace(/\bICARA\w*\b/gi, " ");
+    t = t.replace(/\b\d{8}\b/g, " ");
+    FAIXA.lastIndex = 0;
+    teveFaixa = FAIXA.test(t);
+    t = t.replace(FAIXA, " ").replace(LADO, " ");
     t = t.replace(new RegExp("\\s*\\b" + COMPL + "\\.?\\s*n?[º°]?\\s*\\d+[A-Za-z]?\\b", "gi"), " ");
     t = t.replace(/\s*(?:apt?o?|apart(?:amento)?|casa|loja|bloco|sala)\.?\s*n?[º°]?\s*\d+[A-Za-z]?\b/gi, " ");
     t = t.replace(new RegExp("\\b" + COMPL + "\\b", "gi"), " ");
-    return t.replace(/\s+/g, " ").replace(/^[\s;,-]+|[\s;,-]+$/g, "");
+    t = t.replace(/\bde\s+(?=\d)/gi, " ");
+    t = t.replace(/[^\w\sáàâãéêíóôõúüçÁÀÂÃÉÊÍÓÔÕÚÜÇ;,.-]/g, " ");
+    return t.replace(/\s+/g, " ").replace(/^[\s;,.-]+|[\s;,.-]+$/g, "");
   }
 
   function viasNums(end, conhecidas) {
     // a J&T repete o endereco dentro do proprio campo: sao duas leituras
-    // independentes do mesmo numero num frame so
-    var re = new RegExp("\\b(" + TIPO + ")\\s+((?:(?!\\b" + COMPL + "\\b)[^;,\\d\\n]){2,60}?)[\\s;,-]+(\\d{1,5})\\b", "gi");
+    // independentes do mesmo numero num pedaco so
+    var re = new RegExp("\\b(" + TIPO + ")\\s+((?:(?!\\b" + COMPL + "\\b)[^;,\\d\\n]){2,60}?)[\\s;,.-]+(\\d{1,5})\\b", "gi");
     var m, out = [];
     while ((m = re.exec(end)) !== null) {
       var tp = m[1].replace(/\.$/, "").toLowerCase();
       tp = ({ r:"rua", av:"avenida", al:"alameda", est:"estrada", trav:"travessa" })[tp] || tp;
-      var nm = m[2].replace(/[\s-]*lado\s+(?:[ií]mpar|par)\b.*$/i, "").replace(/\s+/g, " ").replace(/^[\s;,-]+|[\s;,-]+$/g, "");
+      var nm = m[2].replace(/\s+/g, " ").replace(/^[\s;,.-]+|[\s;,.-]+$/g, "");
       out.push([titulo(tp) + " " + titulo(nm), m[3]]);
     }
     if (out.length) return out;
@@ -359,7 +402,7 @@
       var miolo = semAcento(conhecidas[i].replace(new RegExp("^" + TIPO + "\\s+", "i"), ""));
       var pos = semAcento(end).indexOf(miolo);
       if (pos >= 0) {
-        var mn = end.slice(pos + miolo.length).match(new RegExp("^[\\s;,-]*(?!\\b" + COMPL + "\\b)(\\d{1,5})\\b", "i"));
+        var mn = end.slice(pos + miolo.length).match(new RegExp("^[\\s;,.-]*(?!\\b" + COMPL + "\\b)(\\d{1,5})\\b", "i"));
         if (mn) return [[conhecidas[i], mn[1]]];
       }
     }
@@ -374,26 +417,26 @@
         var mc = linhas[i].match(CODIGO);
         if (!mc) continue;
         var cod = mc[1];
-        if (!brutos[cod]) brutos[cod] = { nome: [], end: [] };
+        if (!brutos[cod]) brutos[cod] = { nome: [], end: [], faixa: false };
         var j = i + 1, nome = null;
         while (j < linhas.length) {
           var s = linhas[j].trim();
-          if (s && !RUIDO.test(s) && !DATA.test(s) && !CODIGO.test(s)) { nome = s; break; }
+          if (s && !DATA.test(s) && !CODIGO.test(s) && tirarRuido(s).length > 2) { nome = tirarRuido(s); break; }
           j++;
         }
-        var partes = [], k = nome ? j + 1 : i + 1;
-        while (k < linhas.length) {
-          var s2 = linhas[k].trim();
-          if (!s2) { k++; continue; }
+        var partes = [], k = nome ? j + 1 : i + 1, olhadas = 0;
+        while (k < linhas.length && olhadas < 12) {
+          var s2 = linhas[k].trim(); k++; olhadas++;
+          if (!s2) continue;
           if (DATA.test(s2) || CODIGO.test(s2)) break;
-          var corte2 = s2.split(/(navega|telefone|whats|assinar)/i)[0].trim();
-          if (corte2) partes.push(corte2);
-          if (partes.length >= 3) break;
-          k++;
+          var lim = tirarRuido(s2);
+          if (lim.replace(/[^\w]/g, "").length >= 3) partes.push(lim);
+          if (partes.length >= 4) break;
         }
         var end = limpar(partes.join(" "));
         if (nome) brutos[cod].nome.push(nome);
         if (end)  brutos[cod].end.push(end);
+        if (teveFaixa) brutos[cod].faixa = true;
         i = Math.max(k, i + 1) - 1;
       }
     });
@@ -402,10 +445,15 @@
 
   function votar(xs) {
     if (!xs.length) return [null, {}];
-    var c = {}; xs.forEach(function (x) { c[x] = (c[x] || 0) + 1; });
-    var melhor = null, n = -1;
-    Object.keys(c).forEach(function (k) { if (c[k] > n) { n = c[k]; melhor = k; } });
-    return [melhor, c];
+    // Object.keys ordena chave numerica em ordem CRESCENTE, entao empate entre
+    // "166" e "145" caia sempre no menor — exatamente o comeco da faixa que a
+    // gente acabou de aprender a descartar. Map preserva a ordem de chegada,
+    // e a primeira leitura e a que vale no empate.
+    var m = new Map();
+    xs.forEach(function (x) { m.set(x, (m.get(x) || 0) + 1); });
+    var melhor = null, n = -1, obj = {};
+    m.forEach(function (v, k) { obj[k] = v; if (v > n) { n = v; melhor = k; } });
+    return [melhor, obj];
   }
 
   function interpretar(textos) {
@@ -419,7 +467,7 @@
     var ruasOrd = Object.keys(contRuas).sort(function (a, b) { return contRuas[b] - contRuas[a]; });
     var somaR = ruasOrd.reduce(function (s, r) { return s + contRuas[r]; }, 0);
     var conhecidas = ruasOrd.filter(function (r) { return contRuas[r] >= 2; });
-    var dominantes = ruasOrd.filter(function (r) { return contRuas[r] >= Math.max(3, 0.15 * somaR); });
+    var dominantes = ruasOrd.filter(function (r) { return contRuas[r] >= Math.max(2, 0.10 * somaR); });
 
     function canonizar(rua) {
       if (!rua || dominantes.indexOf(rua) >= 0) return rua;
@@ -427,6 +475,24 @@
       for (var i = 0; i < dominantes.length; i++) {
         var d = semAcento(dominantes[i]);
         if (a.indexOf(d) === 0 || d.indexOf(a) === 0) return dominantes[i];
+      }
+      // uma letra trocada pelo Lens ("Rua Altor Paulo Gustavo") nao pode virar
+      // uma rua nova, senao o agrupamento por faixa quebra
+      for (i = 0; i < dominantes.length; i++) {
+        var dd = semAcento(dominantes[i]);
+        if (Math.abs(a.length - dd.length) <= 3 && distancia(a, dd) <= Math.max(2, Math.floor(dd.length / 8))) {
+          return dominantes[i];
+        }
+      }
+      // ou uma palavra de lixo enfiada no meio ("Ator Paulo Novegan Gustavo"):
+      // se todas as palavras da rua conhecida aparecem na ordem, e ela mesma
+      var pal = a.split(/\s+/);
+      for (i = 0; i < dominantes.length; i++) {
+        var alvo = semAcento(dominantes[i]).split(/\s+/), p = 0;
+        for (var q = 0; q < pal.length && p < alvo.length; q++) {
+          if (pal[q] === alvo[p] || distancia(pal[q], alvo[p]) <= 1) p++;
+        }
+        if (p === alvo.length) return dominantes[i];
       }
       return rua;
     }
@@ -447,9 +513,8 @@
       if (Object.keys(vu[1]).length > 1) disputa.numero = vu[1];
       registros.push({
         codigo: cod, nome: vn[0], rua: vr[0], numero: vu[0],
-        leituras: L.end.length,
-        divergiu: Object.keys(disputa).length > 0,
-        disputa: disputa
+        leituras: L.end.length, faixa: L.faixa,
+        divergiu: Object.keys(disputa).length > 0, disputa: disputa
       });
     });
     return registros;
@@ -765,10 +830,24 @@
       ["Pacotes encontrados", regs.length],
       ["Completos", completos.length],
       ["Faltando algum campo", faltando.length],
-      ["Emendas sem repetição", emendas.length]
+      ["Emendas sem repetição", emendas.length],
+      ["Precisam de conferência", completos.filter(function (r) { return r.faixa || r.divergiu; }).length]
     ].map(function (l) { return "<tr><td>" + l[0] + "</td><td>" + l[1] + "</td></tr>"; }).join("");
 
     var av = "";
+    var comFaixa = completos.filter(function (r) { return r.faixa; });
+    if (comFaixa.length) {
+      av += '<div class="aviso">' + comFaixa.length + " endereço(s) trazem faixa de numeração " +
+            "(\"de 145 a 191 - lado ímpar\"). Nesses o número da casa vem depois da faixa e às vezes " +
+            "aparece mais de um — eu escolhi o mais provável, mas <b>confira antes de sair</b>: " +
+            comFaixa.map(function (r) { return r.rua + ", " + r.numero + " (" + r.nome + ")"; }).join(" · ") + "</div>";
+    }
+    var divs = completos.filter(function (r) { return r.divergiu && !r.faixa; });
+    if (divs.length) {
+      av += '<div class="aviso" style="background:#F7EEDD;border-color:var(--accent-deep);color:var(--accent-deep)">' +
+            divs.length + " pacote(s) com leitura ambígua, resolvida por maioria: " +
+            divs.map(function (r) { return r.codigo + " → " + r.rua + ", " + r.numero; }).join(" · ") + "</div>";
+    }
     if (emendas.length) {
       av += '<div class="aviso">Entre a captura ' +
             emendas.map(function (i) { return i + " e a " + (i + 1); }).join(", e entre a ") +
