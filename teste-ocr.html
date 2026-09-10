@@ -49,6 +49,28 @@
 <p class="sub">Página separada, só pra medir. Não mexe no app nem salva nada.</p>
 
 <div class="card">
+  <label for="colado">Colar texto do Google Lens</label>
+  <p class="mini" style="margin:0 0 8px">
+    Cole uma captura por vez e vá adicionando. <b>Faça cada captura começar uns 2 ou 3
+    pacotes antes de onde a anterior parou</b> — é essa repetição que me deixa provar que
+    nenhum pacote caiu no vão entre elas.
+  </p>
+  <textarea id="colado" placeholder="Cole aqui o texto de UMA captura e toque em Adicionar." style="min-height:110px"></textarea>
+  <div class="row" style="margin-top:10px">
+    <button id="addCap">Adicionar esta captura</button>
+    <button class="sec" id="limparCap">Limpar tudo</button>
+  </div>
+  <div id="listaCap" style="margin-top:10px"></div>
+  <div class="row" style="margin-top:10px">
+    <div style="flex:0 0 auto">
+      <span class="mini">total que a J&amp;T mostra na aba</span><br>
+      <input type="number" id="esperadoMan" min="0" step="1" placeholder="128" style="width:110px" />
+    </div>
+    <button id="montar" style="flex:1">Montar a lista</button>
+  </div>
+</div>
+
+<div class="card">
   <label for="arq">1. Vídeo da lista (gravação de tela)</label>
   <input type="file" id="arq" accept="video/*" />
   <p class="mini" id="infoVideo" style="margin:8px 0 0"></p>
@@ -298,6 +320,17 @@
   }
   function semAcento(s) { return s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase(); }
 
+  // O Lens as vezes devolve letra grega ou cirilica no lugar da latina parecida
+  // ("FAINASANTΑΝΑ" com A e N gregos). Nao atrapalha o numero da casa, mas suja
+  // o nome — e se cair no nome da rua, atrapalha o agrupamento.
+  var CONFUSOS = { "Α":"A","Β":"B","Ε":"E","Ζ":"Z","Η":"H","Ι":"I","Κ":"K","Μ":"M","Ν":"N",
+                   "Ο":"O","Ρ":"P","Τ":"T","Υ":"Y","Χ":"X","α":"a","ε":"e","ο":"o","ρ":"p","τ":"t",
+                   "А":"A","В":"B","Е":"E","К":"K","М":"M","Н":"H","О":"O","Р":"P","С":"C","Т":"T",
+                   "У":"Y","Х":"X","а":"a","е":"e","о":"o","р":"p","с":"c","у":"y","х":"x" };
+  function semConfusos(s) {
+    return s.replace(/[Ͱ-ϿЀ-ӿ]/g, function (c) { return CONFUSOS[c] || c; });
+  }
+
   function limpar(t) {
     t = t.replace(/\s+/g, " ").trim();
     t = t.replace(/\bICARAI\b.*$/i, "").replace(/\bNiter[oó]i\b.*$/i, "");
@@ -336,7 +369,7 @@
   function coletar(textos) {
     var brutos = {};
     textos.forEach(function (txt) {
-      var linhas = txt.split("\n").map(function (l) { return l.replace(/\s+$/, ""); });
+      var linhas = semConfusos(txt).split("\n").map(function (l) { return l.replace(/\s+$/, ""); });
       for (var i = 0; i < linhas.length; i++) {
         var mc = linhas[i].match(CODIGO);
         if (!mc) continue;
@@ -656,6 +689,116 @@
     }).join("\n");
     el("cardRes").hidden = false;
   }
+
+  // ---------- caminho do texto colado (Google Lens) ----------
+  // Varias capturas separadas tem o mesmo risco do video: um pacote pode cair
+  // no vao entre uma e a seguinte e sumir calado. Como aqui nao ha tempo pra
+  // comparar, a prova de continuidade vem da repeticao que o usuario deixa de
+  // proposito: capturas vizinhas TEM que compartilhar codigo.
+  var capturas = [];
+
+  function pintarCapturas() {
+    if (!capturas.length) { el("listaCap").innerHTML = ""; return; }
+    var h = "";
+    capturas.forEach(function (c, i) {
+      var n = Object.keys(c.codigos).length;
+      if (i > 0) {
+        var comum = quantosEmComum(capturas[i - 1].codigos, c.codigos);
+        var cor = comum >= 2 ? "var(--ok)" : (comum === 1 ? "var(--accent-deep)" : "var(--alert)");
+        var txt = comum >= 2 ? comum + " pacotes repetidos — emenda confirmada"
+                : comum === 1 ? "só 1 repetido — margem curta, pode ter escapado algum"
+                : "NENHUM repetido — provavelmente faltou pacote entre estas duas";
+        h += '<div style="font-size:11.5px;font-weight:600;color:' + cor + ';padding:3px 0 3px 10px">↕ ' + txt + "</div>";
+      }
+      h += '<div style="display:flex;justify-content:space-between;align-items:center;background:var(--paper-deep);' +
+           'border:1px solid var(--line);border-radius:7px;padding:7px 10px;font-size:12.5px">' +
+           "<span>Captura " + (i + 1) + " · <b>" + n + "</b> pacote(s)</span>" +
+           '<button class="sec" data-rm="' + i + '" style="width:auto;padding:3px 10px;font-size:11px">remover</button></div>';
+    });
+    var todos = {};
+    capturas.forEach(function (c) { for (var k in c.codigos) todos[k] = 1; });
+    h += '<p class="mini" style="margin:8px 0 0"><b>' + Object.keys(todos).length +
+         "</b> pacotes distintos somando tudo</p>";
+    el("listaCap").innerHTML = h;
+    Array.prototype.forEach.call(el("listaCap").querySelectorAll("[data-rm]"), function (b) {
+      b.onclick = function () { capturas.splice(+b.getAttribute("data-rm"), 1); pintarCapturas(); };
+    });
+  }
+
+  el("addCap").onclick = function () {
+    var txt = el("colado").value;
+    if (!txt.trim()) return;
+    var cods = codigosDe(semConfusos(txt));
+    if (!Object.keys(cods).length) {
+      el("listaCap").innerHTML = '<div class="aviso">Não achei nenhum código de 15 dígitos nesse texto. ' +
+        "Confere se o Lens copiou mesmo a lista.</div>";
+      return;
+    }
+    capturas.push({ texto: txt, codigos: cods });
+    el("colado").value = "";
+    el("colado").focus();
+    pintarCapturas();
+  };
+
+  el("limparCap").onclick = function () {
+    capturas = []; el("colado").value = ""; pintarCapturas();
+    el("cardRes").hidden = true;
+  };
+
+  el("montar").onclick = function () {
+    var pendente = el("colado").value.trim();
+    if (pendente) { el("addCap").onclick(); }
+    if (!capturas.length) return;
+
+    var regs = interpretar(capturas.map(function (c) { return c.texto; }));
+    var completos = regs.filter(function (r) { return r.rua && r.numero && r.nome; });
+    var faltando  = regs.filter(function (r) { return !(r.rua && r.numero && r.nome); });
+    var esperado = +el("esperadoMan").value || 0;
+
+    var emendas = [];
+    for (var i = 1; i < capturas.length; i++) {
+      if (quantosEmComum(capturas[i - 1].codigos, capturas[i].codigos) === 0) emendas.push(i);
+    }
+
+    el("tabela").innerHTML = [
+      ["Capturas coladas", capturas.length],
+      ["Pacotes encontrados", regs.length],
+      ["Completos", completos.length],
+      ["Faltando algum campo", faltando.length],
+      ["Emendas sem repetição", emendas.length]
+    ].map(function (l) { return "<tr><td>" + l[0] + "</td><td>" + l[1] + "</td></tr>"; }).join("");
+
+    var av = "";
+    if (emendas.length) {
+      av += '<div class="aviso">Entre a captura ' +
+            emendas.map(function (i) { return i + " e a " + (i + 1); }).join(", e entre a ") +
+            " não há nenhum pacote repetido. Não dá pra garantir que nada caiu no vão — " +
+            "refaça essas capturas com sobreposição.</div>";
+    }
+    if (esperado) {
+      var dif = esperado - completos.length;
+      av += '<div class="aviso" style="' + (dif === 0
+              ? "background:#DEEBE2;border-color:var(--ok);color:var(--ok)"
+              : "background:#F7EEDD;border-color:var(--accent-deep);color:var(--accent-deep)") + '">' +
+            "A J&amp;T mostra " + esperado + " e eu montei " + completos.length +
+            (dif === 0 ? " — bate certinho, pode usar." : " — faltam " + dif + ". Continue capturando.") + "</div>";
+    }
+    if (faltando.length) {
+      av += '<div class="aviso">' + faltando.length + " pacote(s) sem endereço completo — o texto colado " +
+            "cortou o cartão no meio. Códigos: " + faltando.map(function (r) { return r.codigo; }).join(", ") + "</div>";
+    }
+    if (!av) av = '<p class="bom" style="margin:8px 0 0">Nenhum problema encontrado.</p>';
+    el("avisos").innerHTML = av;
+
+    completos.sort(function (a, b) {
+      return a.rua === b.rua ? (+a.numero) - (+b.numero) : a.rua.localeCompare(b.rua);
+    });
+    el("saida").value = completos.map(function (r) {
+      return r.rua + ", " + r.numero + ", " + r.nome + ", " + r.codigo;
+    }).join("\n");
+    el("cardRes").hidden = false;
+    el("cardRes").scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   el("copiar").onclick = function () {
     el("saida").select();
