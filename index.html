@@ -951,7 +951,57 @@
       if (c.tipo && alvo.tipo && c.tipo !== alvo.tipo) return false;
       return c.nucleo === alvo.nucleo;
     });
-    return m || null;
+    if (m) return m;
+
+    // Daqui pra baixo só roda quando TODAS as tentativas acima já falharam —
+    // ou seja, quando o pacote ia pra caixa cinza de qualquer jeito. Nada do
+    // que já casava antes passa por aqui.
+    //
+    // O nome da rua chega torto de dois jeitos: quem digitou no sistema errou,
+    // ou a leitura do print errou. E erra nos dois sentidos — sobra palavra
+    // ("Ator Paulo Novegan Gustavo"), falta palavra ("Paulo Gustavo" sem o
+    // Ator), ou troca letra ("Geenhalch" por "Greenhalgh"). Em todos esses o
+    // pacote pertence a uma rua que JÁ está nas Faixas, e é lá que ele tem
+    // que cair pra ganhar cor.
+    var palavras = alvo.nucleo.split(" ").filter(Boolean);
+    if (!palavras.length) return null;
+
+    function distanciaTexto(a, b) {
+      if (Math.abs(a.length - b.length) > 3) return 99;
+      var ant = [], i, j;
+      for (j = 0; j <= b.length; j++) ant[j] = j;
+      for (i = 1; i <= a.length; i++) {
+        var atual = [i];
+        for (j = 1; j <= b.length; j++) {
+          atual[j] = Math.min(ant[j] + 1, atual[j - 1] + 1,
+                              ant[j - 1] + (a.charAt(i - 1) !== b.charAt(j - 1) ? 1 : 0));
+        }
+        ant = atual;
+      }
+      return ant[b.length];
+    }
+    // as palavras de uma cabem na outra, na ordem, tolerando uma letra trocada
+    function cabeEm(menor, maior) {
+      var p = 0;
+      for (var q = 0; q < maior.length && p < menor.length; q++) {
+        if (maior[q] === menor[p] || distanciaTexto(maior[q], menor[p]) <= 1) p++;
+      }
+      return p === menor.length;
+    }
+
+    var candidatos = mapa.filter(function (r) {
+      var c = partesRua(r.nome);
+      if (c.tipo && alvo.tipo && c.tipo !== alvo.tipo) return false;
+      var dele = (c.nucleo || "").split(" ").filter(Boolean);
+      if (!dele.length) return false;
+      if (cabeEm(dele, palavras) || cabeEm(palavras, dele)) return true;
+      // nome inteiro com uma ou duas letras trocadas
+      return distanciaTexto(alvo.nucleo, c.nucleo) <= Math.max(1, Math.floor(c.nucleo.length / 8));
+    });
+    // Só vale quando UMA rua das Faixas encaixa. Se duas encaixam, eu estaria
+    // escolhendo entre ruas de verdade — e mandar o pacote pra rua errada é
+    // pior que deixar ele na caixa cinza, que pelo menos aparece.
+    return candidatos.length === 1 ? candidatos[0] : null;
   }
   function parseLinhas(texto) {
     return texto.split("\n").map(function (l) { return l.trim(); }).filter(Boolean).map(function (linha, idx) {
@@ -996,6 +1046,7 @@
     aba: "escanear",
     mapaRuas: [],
     textoColado: "",
+    lens: { aberto: false, capturas: [], esperado: "", rascunho: "" },
     linhasParseadas: null,
     pacoteStatus: {},
     novoNomeRua: "",
@@ -1162,6 +1213,16 @@
   }
 
   state.mapaRuas = normalizarMapaRuas(carregar("mapa-ruas", []));
+  // as capturas ficam guardadas: buscar cada pedaço no Lens obriga a sair do
+  // navegador, e o Android descarta a aba enquanto a pessoa está fora
+  (function () {
+    var g = carregar("lens-capturas", null);
+    if (g && g.capturas) {
+      state.lens.capturas = g.capturas;
+      state.lens.esperado = g.esperado || "";
+      state.lens.rascunho = g.rascunho || "";
+    }
+  })();
   state.contadorGlobal = carregar("contador-pacotes-total", 0);
   state.minhaRota = carregar("minha-rota", "");
   state.filaPendente = carregar("fila-fotos-pendentes", []);
@@ -2866,15 +2927,308 @@
     return html;
   }
 
+
+  // ===================== Colar do Google Lens =====================
+  // A J&T não libera PDF nem planilha da lista do dia. O caminho que sobrou é
+  // capturar a tela do app deles e passar o Google Lens, que devolve o texto
+  // exato (não uma leitura dele). Aqui esse texto vira as linhas que a caixa
+  // de sempre já aceita — parseLinhas e "Organizar pacotes" continuam iguais.
+  var LENS_COMPL = "(?:apt?o?|apart(?:amento)?|casa|cs|loja|lj|bloco|bl|sala|sl|andar|and|quadra|qd|lote|lt|fundos|sobrado)";
+  var LENS_TIPO  = "(?:rua|avenida|av\\.?|travessa|trav\\.?|estrada|est\\.?|pra[cç]a|alameda|al\\.?|largo|rodovia|r\\.)";
+  var LENS_DATA  = /20\d\d-\d\d-\d\d/;
+  var LENS_COD   = /\b(\d{15})\b/;
+  var LENS_CODG  = /\b(\d{15})\b/g;
+  // "de 145 a 191", "107 a 143", "100 a 150": faixa de numeração dos Correios.
+  // O número da casa é o FIM da faixa, no lado par e no ímpar.
+  var LENS_FAIXA = /\b(?:de\s+)?(\d{1,5})\s+a\s+(\d{1,5})\b/gi;
+  var LENS_LADO  = /[\s-]*lado\s*[íi]?mpar\b|[\s-]*lado\s*par\b|[\s-]*\b[íi]mpar\b/gi;
+  // o Lens troca letra latina por grega/cirílica parecida ("FAINASANTΑΝΑ")
+  var LENS_CONF = { "Α":"A","Β":"B","Ε":"E","Ζ":"Z","Η":"H","Ι":"I","Κ":"K","Μ":"M","Ν":"N","Ο":"O",
+                    "Ρ":"P","Τ":"T","Υ":"Y","Χ":"X","α":"a","ε":"e","ο":"o","ρ":"p","τ":"t",
+                    "А":"A","В":"B","Е":"E","К":"K","М":"M","Н":"H","О":"O","Р":"P","С":"C","Т":"T",
+                    "У":"Y","Х":"X","а":"a","е":"e","о":"o","р":"p","с":"c","у":"y","х":"x" };
+  // ele também erra a grafia do rótulo dos próprios botões: "novegapão",
+  // "telekone", "avegação". Comparar por semelhança pega todas as variantes.
+  var LENS_RUIDO = ["navegacao", "telefone", "whatsapp", "assinar", "roteirizacao"];
+
+  function lensDist(a, b) {
+    if (Math.abs(a.length - b.length) > 3) return 99;
+    var ant = [], i, j;
+    for (j = 0; j <= b.length; j++) ant[j] = j;
+    for (i = 1; i <= a.length; i++) {
+      var at = [i];
+      for (j = 1; j <= b.length; j++) {
+        at[j] = Math.min(ant[j] + 1, at[j - 1] + 1, ant[j - 1] + (a.charAt(i - 1) !== b.charAt(j - 1) ? 1 : 0));
+      }
+      ant = at;
+    }
+    return ant[b.length];
+  }
+  function lensSemConf(t) { return t.replace(/[Ͱ-ϿЀ-ӿ]/g, function (c) { return LENS_CONF[c] || c; }); }
+  function lensEhRuido(tk) {
+    var t = normalizar(tk).replace(/[^a-z]/g, "");
+    if (t.length < 5) return false;
+    for (var i = 0; i < LENS_RUIDO.length; i++) {
+      if (lensDist(t, LENS_RUIDO[i]) <= Math.max(2, Math.floor(LENS_RUIDO[i].length / 4))) return true;
+    }
+    return false;
+  }
+  function lensTiraRuido(t) {
+    return t.split(/\s+/).map(function (tk) { return lensEhRuido(tk) ? "" : tk; }).join(" ").trim();
+  }
+  function lensTitulo(t) {
+    var min = { e:1, de:1, da:1, do:1, dos:1, das:1, a:1, o:1 };
+    return t.split(/\s+/).map(function (p, i) {
+      var pl = p.toLowerCase();
+      return (i > 0 && min[pl]) ? pl : pl.charAt(0).toUpperCase() + pl.slice(1);
+    }).join(" ");
+  }
+
+  var lensFaixa = false, lensFimFaixa = "", lensFaixaOk = false;
+  function lensLimpar(t) {
+    t = lensTiraRuido(t);
+    t = t.replace(/\(\s*\d\s*\)/g, " ");                 // o ícone do botão vira "(1)"
+    t = t.replace(/\bNiter[oó]i\b[\s\S]*$/i, "");
+    // ICARAI às vezes vem na FRENTE ("Icarai, Rua Mariz e Barros: 491"), não só
+    // no fim como bairro — cortar a partir dele apagava o endereço inteiro
+    t = t.replace(/\bICARA\w*\b/gi, " ");
+    t = t.replace(/\b\d{8}\b/g, " ");
+    LENS_FAIXA.lastIndex = 0;
+    lensFaixa = LENS_FAIXA.test(t);
+    lensFimFaixa = ""; lensFaixaOk = false;
+    if (lensFaixa) {
+      LENS_FAIXA.lastIndex = 0;
+      var mf, fins = [];
+      while ((mf = LENS_FAIXA.exec(t)) !== null) fins.push(mf[2]);
+      lensFimFaixa = fins.length ? fins[fins.length - 1] : "";
+      // o resto do endereço costuma repetir o número certo: quando repete, é
+      // confirmação; quando não, é onde mora o endereço digitado errado
+      if (lensFimFaixa) lensFaixaOk = new RegExp("\\b" + lensFimFaixa + "\\b").test(t.replace(LENS_FAIXA, " "));
+    }
+    t = t.replace(LENS_FAIXA, " ").replace(LENS_LADO, " ");
+    t = t.replace(new RegExp("\\s*\\b" + LENS_COMPL + "\\.?\\s*n?[º°]?\\s*\\d+[A-Za-z]?\\b", "gi"), " ");
+    t = t.replace(/\s*(?:apt?o?|apart(?:amento)?|casa|loja|bloco|sala)\.?\s*n?[º°]?\s*\d+[A-Za-z]?\b/gi, " ");
+    t = t.replace(new RegExp("\\b" + LENS_COMPL + "\\b", "gi"), " ");
+    t = t.replace(/\bde\s+(?=\d)/gi, " ");
+    t = t.replace(/[^\w\sáàâãéêíóôõúüçÁÀÂÃÉÊÍÓÔÕÚÜÇ;,.-]/g, " ");
+    return t.replace(/\s+/g, " ").replace(/^[\s;,.-]+|[\s;,.-]+$/g, "");
+  }
+
+  function lensVias(end) {
+    // a J&T repete o endereço dentro do próprio campo, então um pedaço só já
+    // traz duas leituras independentes do mesmo número
+    var re = new RegExp("\\b(" + LENS_TIPO + ")\\s+((?:(?!\\b" + LENS_COMPL + "\\b)[^;,\\d\\n]){2,60}?)[\\s;,.-]+(\\d{1,5})\\b", "gi");
+    var m, out = [];
+    while ((m = re.exec(end)) !== null) {
+      var tp = m[1].replace(/\.$/, "").toLowerCase();
+      tp = ({ r:"rua", av:"avenida", al:"alameda", est:"estrada", trav:"travessa" })[tp] || tp;
+      out.push([lensTitulo(tp) + " " + lensTitulo(m[2].replace(/\s+/g, " ").replace(/^[\s;,.-]+|[\s;,.-]+$/g, "")), m[3]]);
+    }
+    if (out.length) return out;
+    // Endereço que chega sem o "Rua" na frente ("O Ator Paulo Gustavo, 155",
+    // "Mariz e Barros 126"): procura pelo nome das ruas que já estão nas
+    // Faixas e pega o número logo depois. Sem isso o pacote ficava sem rua.
+    var alvo = normalizar(end);
+    for (var i = 0; i < state.mapaRuas.length; i++) {
+      var nucleo = partesRua(state.mapaRuas[i].nome).nucleo;
+      if (!nucleo || nucleo.length < 4) continue;
+      var pos = alvo.indexOf(nucleo);
+      if (pos < 0) continue;
+      var mn = end.slice(pos + nucleo.length).match(new RegExp("^[\\s;,.-]*(?!\\b" + LENS_COMPL + "\\b)(\\d{1,5})\\b", "i"));
+      if (mn) return [[state.mapaRuas[i].nome, mn[1]]];
+    }
+    return out;
+  }
+
+  function lensCodigosDe(txt) {
+    var s = {}, m; LENS_CODG.lastIndex = 0;
+    while ((m = LENS_CODG.exec(txt)) !== null) s[m[1]] = 1;
+    return s;
+  }
+  function lensEmComum(a, b) { var n = 0; for (var k in a) if (b[k]) n++; return n; }
+
+  function lensInterpretar(textos) {
+    var brutos = {};
+    textos.forEach(function (txt) {
+      var linhas = lensSemConf(txt).split("\n").map(function (l) { return l.replace(/\s+$/, ""); });
+      for (var i = 0; i < linhas.length; i++) {
+        var mc = linhas[i].match(LENS_COD);
+        if (!mc) continue;
+        var cod = mc[1];
+        if (!brutos[cod]) brutos[cod] = { nome: [], end: [], faixa: false, fim: "", ok: false, cru: "" };
+        var j = i + 1, nome = null;
+        while (j < linhas.length) {
+          var sl = linhas[j].trim();
+          if (sl && !LENS_DATA.test(sl) && !LENS_COD.test(sl) && lensTiraRuido(sl).length > 2) { nome = lensTiraRuido(sl); break; }
+          j++;
+        }
+        var partes = [], k = nome ? j + 1 : i + 1, olh = 0;
+        while (k < linhas.length && olh < 12) {
+          var s2 = linhas[k].trim(); k++; olh++;
+          if (!s2) continue;
+          if (LENS_DATA.test(s2) || LENS_COD.test(s2)) break;
+          var lim = lensTiraRuido(s2);
+          if (lim.replace(/[^\w]/g, "").length >= 3) partes.push(lim);
+          if (partes.length >= 4) break;
+        }
+        var cru = partes.join(" ");
+        var end = lensLimpar(cru);
+        if (nome) brutos[cod].nome.push(nome);
+        if (end) brutos[cod].end.push(end);
+        if (lensFaixa) {
+          brutos[cod].faixa = true;
+          if (lensFimFaixa) brutos[cod].fim = lensFimFaixa;
+          if (lensFaixaOk) brutos[cod].ok = true;
+          if (!brutos[cod].cru) brutos[cod].cru = cru.replace(/\s+/g, " ").trim();
+        }
+        i = Math.max(k, i + 1) - 1;
+      }
+    });
+
+    function votar(xs) {
+      if (!xs.length) return null;
+      var m = new Map();
+      xs.forEach(function (x) { m.set(x, (m.get(x) || 0) + 1); });
+      var melhor = null, n = -1;
+      m.forEach(function (v, k) { if (v > n) { n = v; melhor = k; } });
+      return melhor;
+    }
+
+    var regs = [];
+    Object.keys(brutos).forEach(function (cod) {
+      var L = brutos[cod], ruas = [], nums = [];
+      L.end.forEach(function (e) {
+        lensVias(e).forEach(function (par) {
+          // É AQUI que a aba Faixas manda: se a rua lida bate com uma cadastrada,
+          // vale o nome que está lá. Sem isso cada leitura torta virava uma rua
+          // nova e o pacote caía na caixa cinza sem cor.
+          var oficial = encontrarRuaMapeada(par[0], state.mapaRuas);
+          ruas.push(oficial ? oficial.nome : par[0]);
+          nums.push(par[1]);
+        });
+      });
+      regs.push({
+        codigo: cod, nome: votar(L.nome), rua: votar(ruas),
+        numero: (L.faixa && L.fim) ? L.fim : votar(nums),
+        faixa: L.faixa, faixaOk: L.ok, cru: L.cru
+      });
+    });
+    return regs;
+  }
+
+
+  function lensSalvar() {
+    salvar("lens-capturas", { capturas: state.lens.capturas, esperado: state.lens.esperado, rascunho: state.lens.rascunho });
+  }
+
+  function renderLens() {
+    var L = state.lens, html = "";
+    html += '<div style="display:flex;align-items:center;gap:10px;margin:4px 0 12px">' +
+      '<button data-action="lens-fechar" style="border:none;background:none;font-size:22px;color:var(--ink);opacity:.6;cursor:pointer;padding:0">✕</button>' +
+      '<strong style="font-size:16px">Colar do Google Lens</strong></div>';
+
+    html += '<div class="card" style="padding:12px;font-size:12px;line-height:1.5;margin-bottom:12px">' +
+      '<p style="margin:0 0 6px;font-weight:600">Como fazer:</p>' +
+      '<p style="margin:2px 0">1. No app da J&amp;T, captura de rolagem da lista</p>' +
+      '<p style="margin:2px 0">2. Google Fotos → Lens → Selecionar tudo → Copiar</p>' +
+      '<p style="margin:2px 0">3. Cola aqui e toca em Adicionar</p>' +
+      '<p style="margin:6px 0 0;color:var(--accent-deep);font-weight:600">Comece cada captura 2 ou 3 pacotes antes de onde a anterior parou — é essa repetição que prova que nenhum pacote caiu no vão.</p></div>';
+
+    html += '<textarea id="lensTexto" class="card" rows="5" placeholder="Cole aqui o texto de UMA captura" style="width:100%;font-size:13px;font-family:ui-monospace,monospace;padding:10px;margin-bottom:10px;color:var(--ink)">' + esc(L.rascunho || "") + '</textarea>';
+    html += '<button class="btn-primary" data-action="lens-add" style="margin-bottom:10px">Adicionar esta captura</button>';
+
+    if (L.capturas.length) {
+      var todos = {};
+      html += '<div style="margin-bottom:10px">';
+      L.capturas.forEach(function (t, i) {
+        var cods = lensCodigosDe(lensSemConf(t));
+        for (var k in cods) todos[k] = 1;
+        if (i > 0) {
+          var comum = lensEmComum(lensCodigosDe(lensSemConf(L.capturas[i - 1])), cods);
+          var cor = comum >= 2 ? "var(--ok)" : (comum === 1 ? "var(--accent-deep)" : "var(--alert)");
+          var txt = comum >= 2 ? comum + " pacotes repetidos — emenda confirmada"
+                  : comum === 1 ? "só 1 repetido — margem curta"
+                  : "NENHUM repetido — pode ter faltado pacote entre estas duas";
+          html += '<div style="font-size:11.5px;font-weight:600;color:' + cor + ';padding:3px 0 3px 10px">↕ ' + txt + '</div>';
+        }
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;background:var(--paper-deep);border:1px solid var(--line);border-radius:7px;padding:7px 10px;font-size:12.5px;margin-bottom:2px">' +
+          '<span>Captura ' + (i + 1) + ' · <b>' + Object.keys(cods).length + '</b> pacote(s)</span>' +
+          '<button class="pill" data-action="lens-rm" data-i="' + i + '">remover</button></div>';
+      });
+      html += '</div>';
+      var n = Object.keys(todos).length;
+      var esp = parseInt(L.esperado, 10);
+      html += '<div class="card" style="padding:10px;margin-bottom:10px;font-size:13px;display:flex;justify-content:space-between;align-items:center">' +
+        '<span><b>' + n + '</b> pacotes somando tudo</span>' +
+        (esp ? '<span style="font-weight:700;color:' + (n >= esp ? "var(--ok)" : "var(--accent-deep)") + '">' +
+               (n >= esp ? "bate com " + esp : "faltam " + (esp - n)) + '</span>' : "") + '</div>';
+    }
+
+    html += '<div style="display:flex;gap:10px;align-items:flex-end;margin-bottom:12px">' +
+      '<div><span style="font-size:11px;opacity:.65">total na aba da J&amp;T</span><br>' +
+      '<input id="lensEsperado" type="number" min="0" value="' + esc(L.esperado || "") + '" placeholder="289" style="width:100px;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
+      '<button class="btn-primary" data-action="lens-montar" style="flex:1"' + (!L.capturas.length ? " disabled" : "") + '>Usar esta lista</button></div>';
+
+    if (L.capturas.length) {
+      html += '<button class="btn-primary" data-action="lens-limpar" style="background:transparent;border:1px solid var(--line);color:var(--ink);opacity:.7">Limpar as capturas</button>';
+    }
+    return html;
+  }
+
+  function lensMontar() {
+    var L = state.lens;
+    if (L.rascunho && L.rascunho.trim()) { lensAdicionar(); }
+    if (!L.capturas.length) return;
+    var regs = lensInterpretar(L.capturas);
+    var completos = regs.filter(function (r) { return r.rua && r.numero && r.nome; });
+    var faltando = regs.filter(function (r) { return !(r.rua && r.numero && r.nome); });
+    var conferir = completos.filter(function (r) { return r.faixa && !r.faixaOk; });
+
+    completos.sort(function (a, b) {
+      return a.rua === b.rua ? (parseInt(a.numero, 10) - parseInt(b.numero, 10)) : a.rua.localeCompare(b.rua);
+    });
+    var texto = completos.map(function (r) {
+      return r.rua + ", " + r.numero + ", " + r.nome + ", " + r.codigo;
+    }).join("\n");
+
+    var avisos = [];
+    if (faltando.length) avisos.push(faltando.length + " pacote(s) ficaram sem endereço completo (o texto cortou o cartão no meio): " + faltando.map(function (r) { return r.codigo; }).join(", "));
+    if (conferir.length) avisos.push(conferir.length + " endereço(s) com faixa de numeração que o resto do endereço não confirmou — confira: " + conferir.map(function (r) { return r.rua + ", " + r.numero + " (" + r.nome + ")"; }).join(" · "));
+    var esp = parseInt(L.esperado, 10);
+    if (esp && completos.length < esp) avisos.push("A J&T mostra " + esp + " e saíram " + completos.length + ". Faltam " + (esp - completos.length) + " — dá pra voltar e colar mais capturas.");
+
+    state.textoColado = texto;
+    state.lens.aberto = false;
+    render();
+    if (avisos.length) alert("Lista pronta com " + completos.length + " pacotes.\n\n" + avisos.join("\n\n"));
+  }
+
+  function lensAdicionar() {
+    var t = state.lens.rascunho || "";
+    if (!t.trim()) return;
+    if (!Object.keys(lensCodigosDe(lensSemConf(t))).length) {
+      alert("Não achei nenhum código de 15 dígitos nesse texto. Confira se o Lens copiou mesmo a lista.");
+      return;
+    }
+    state.lens.capturas.push(t);
+    state.lens.rascunho = "";
+    lensSalvar();
+    render();
+  }
+
   function renderSeparar() {
     var html = "";
+    if (state.lens.aberto) return renderLens();
     if (!state.linhasParseadas) {
       html += '<div class="card" style="padding:12px;font-size:12px;line-height:1.5;margin-bottom:12px">' +
         '<p style="font-weight:600;margin:0 0 4px">Cole 1 pacote por linha:</p>' +
         '<p style="font-family:ui-monospace,monospace;opacity:.7;margin:2px 0">Rua, N\u00famero, Nome, C\u00f3digo (nome e c\u00f3digo s\u00e3o opcionais)</p>' +
         '<p style="font-family:ui-monospace,monospace;opacity:.5;margin:2px 0">Rua Mariz e Barros, 501, Anne Elise, 888030883495876</p></div>' +
         '<textarea id="textoColado" class="card" rows="10" placeholder="Rua Ator Paulo Gustavo, 72, Jo\u00e3o Silva, 888030883491111' + "\n" + 'Rua Mariz e Barros, 501, Anne Elise, 888030883495555" style="width:100%;font-size:14px;font-family:ui-monospace,monospace;padding:12px;margin-bottom:12px;color:var(--ink)">' + esc(state.textoColado) + "</textarea>" +
-        '<button class="btn-primary" data-action="organizar"' + (!state.textoColado.trim() ? " disabled" : "") + ">Organizar pacotes</button>";
+        '<button class="btn-primary" data-action="organizar"' + (!state.textoColado.trim() ? " disabled" : "") + ">Organizar pacotes</button>" +
+        '<div style="display:flex;align-items:center;gap:9px;font-size:11px;opacity:.5;margin:14px 0"><span style="flex:1;height:1px;background:var(--line)"></span>ou<span style="flex:1;height:1px;background:var(--line)"></span></div>' +
+        '<button class="btn-primary" data-action="lens-abrir" style="background:var(--accent-deep)">\u{1F4CB} Colar do Google Lens</button>' +
+        '<p style="font-size:11px;opacity:.6;margin:7px 0 0;line-height:1.45">Pra quando a lista vem da captura de tela do app da J&T: eu separo rua, n\u00famero, nome e c\u00f3digo sozinho.</p>';
       return html;
     }
 
@@ -3035,6 +3389,31 @@
     if (organizarBtn) organizarBtn.onclick = organizarPacotes;
     var limparSessaoBtn = app.querySelector('[data-action="limpar-sessao"]');
     if (limparSessaoBtn) limparSessaoBtn.onclick = limparSessao;
+
+    // ---- colar do Google Lens ----
+    var lensAbrir = app.querySelector('[data-action="lens-abrir"]');
+    if (lensAbrir) lensAbrir.onclick = function () { state.lens.aberto = true; render(); };
+    var lensFechar = app.querySelector('[data-action="lens-fechar"]');
+    if (lensFechar) lensFechar.onclick = function () { state.lens.aberto = false; render(); };
+    var lensTexto = document.getElementById("lensTexto");
+    if (lensTexto) lensTexto.oninput = function () { state.lens.rascunho = lensTexto.value; lensSalvar(); };
+    var lensEsperado = document.getElementById("lensEsperado");
+    if (lensEsperado) lensEsperado.oninput = function () { state.lens.esperado = lensEsperado.value; lensSalvar(); };
+    var lensAdd = app.querySelector('[data-action="lens-add"]');
+    if (lensAdd) lensAdd.onclick = lensAdicionar;
+    var lensMont = app.querySelector('[data-action="lens-montar"]');
+    if (lensMont) lensMont.onclick = lensMontar;
+    var lensLimp = app.querySelector('[data-action="lens-limpar"]');
+    if (lensLimp) lensLimp.onclick = function () {
+      if (!confirm("Apagar as capturas coladas?")) return;
+      state.lens.capturas = []; state.lens.rascunho = ""; lensSalvar(); render();
+    };
+    app.querySelectorAll('[data-action="lens-rm"]').forEach(function (el) {
+      el.onclick = function () {
+        state.lens.capturas.splice(parseInt(el.getAttribute("data-i"), 10), 1);
+        lensSalvar(); render();
+      };
+    });
 
     app.querySelectorAll('[data-action="toggle-separado"]').forEach(function (el) {
       el.onclick = function () {
