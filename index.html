@@ -3059,14 +3059,20 @@
         var j = i + 1, nome = null;
         while (j < linhas.length) {
           var sl = linhas[j].trim();
-          if (sl && !LENS_DATA.test(sl) && !LENS_COD.test(sl) && lensTiraRuido(sl).length > 2) { nome = lensTiraRuido(sl); break; }
+          if (LENS_COD.test(sl)) break;   // já começou outro cartão: este ficou sem nome
+          if (sl && !LENS_DATA.test(sl) && lensTiraRuido(sl).length > 2) { nome = lensTiraRuido(sl); break; }
           j++;
         }
         var partes = [], k = nome ? j + 1 : i + 1, olh = 0;
         while (k < linhas.length && olh < 12) {
-          var s2 = linhas[k].trim(); k++; olh++;
-          if (!s2) continue;
+          var s2 = linhas[k].trim();
+          // A parada tem que ser testada ANTES de avançar o cursor. Avançando
+          // primeiro, a linha do próximo código ficava para trás e aquele
+          // pacote sumia da lista inteira — sem erro, sem aviso, sem nada.
+          // Acontece sempre que um cartão vem sem a linha de data.
           if (LENS_DATA.test(s2) || LENS_COD.test(s2)) break;
+          k++; olh++;
+          if (!s2) continue;
           var lim = lensTiraRuido(s2);
           if (lim.replace(/[^\w]/g, "").length >= 3) partes.push(lim);
           if (partes.length >= 4) break;
@@ -3180,6 +3186,23 @@
     if (L.rascunho && L.rascunho.trim()) { lensAdicionar(); }
     if (!L.capturas.length) return;
     var regs = lensInterpretar(L.capturas);
+
+    // Trava de sanidade: todo código que existe no texto TEM que virar um
+    // registro. Um sumiço aqui não dá erro nem aparece na tela — foi assim que
+    // 21 pacotes de 289 evaporaram sem ninguém notar. Se acontecer de novo,
+    // que pelo menos apareça.
+    var codsTexto = {};
+    L.capturas.forEach(function (t) {
+      var c = lensCodigosDe(lensSemConf(t));
+      for (var k in c) codsTexto[k] = 1;
+    });
+    var noTexto = Object.keys(codsTexto).length;
+    var sumiram = [];
+    if (noTexto !== regs.length) {
+      var temRegistro = {};
+      regs.forEach(function (r) { temRegistro[r.codigo] = 1; });
+      sumiram = Object.keys(codsTexto).filter(function (c) { return !temRegistro[c]; });
+    }
     var completos = regs.filter(function (r) { return r.rua && r.numero && r.nome; });
     var faltando = regs.filter(function (r) { return !(r.rua && r.numero && r.nome); });
     var conferir = completos.filter(function (r) { return r.faixa && !r.faixaOk; });
@@ -3192,6 +3215,7 @@
     }).join("\n");
 
     var avisos = [];
+    if (sumiram.length) avisos.push("ATENÇÃO: " + sumiram.length + " código(s) estão no texto colado mas não entraram na lista. Isso é falha do app, não sua — me mostre esta mensagem: " + sumiram.slice(0, 8).join(", ") + (sumiram.length > 8 ? " e mais " + (sumiram.length - 8) : ""));
     if (faltando.length) avisos.push(faltando.length + " pacote(s) ficaram sem endereço completo (o texto cortou o cartão no meio): " + faltando.map(function (r) { return r.codigo; }).join(", "));
     if (conferir.length) avisos.push(conferir.length + " endereço(s) com faixa de numeração que o resto do endereço não confirmou — confira: " + conferir.map(function (r) { return r.rua + ", " + r.numero + " (" + r.nome + ")"; }).join(" · "));
     var esp = parseInt(L.esperado, 10);
