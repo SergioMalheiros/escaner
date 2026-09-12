@@ -2936,8 +2936,13 @@
   var LENS_COMPL = "(?:apt?o?|apart(?:amento)?|casa|cs|loja|lj|bloco|bl|sala|sl|andar|and|quadra|qd|lote|lt|fundos|sobrado)";
   var LENS_TIPO  = "(?:rua|avenida|av\\.?|travessa|trav\\.?|estrada|est\\.?|pra[cç]a|alameda|al\\.?|largo|rodovia|r\\.)";
   var LENS_DATA  = /20\d\d-\d\d-\d\d/;
-  var LENS_COD   = /\b(\d{15})\b/;
-  var LENS_CODG  = /\b(\d{15})\b/g;
+  // O Lens erra dígito do código: cola um a mais ("999881999515503" vira
+  // "9998819995155030") ou troca um. Exigindo exatamente 15 dígitos, o pacote
+  // com dígito a mais ficava INVISÍVEL, e o com dígito trocado virava um
+  // pacote fantasma. Aceito de 14 a 17 e conserto depois, comparando com os
+  // códigos que vieram certos.
+  var LENS_COD   = /\b(\d{14,17})\b/;
+  var LENS_CODG  = /\b(\d{14,17})\b/g;
   // "de 145 a 191", "107 a 143", "100 a 150": faixa de numeração dos Correios.
   // O número da casa é o FIM da faixa, no lado par e no ímpar.
   var LENS_FAIXA = /\b(?:de\s+)?(\d{1,5})\s+a\s+(\d{1,5})\b/gi;
@@ -3047,6 +3052,60 @@
   }
   function lensEmComum(a, b) { var n = 0; for (var k in a) if (b[k]) n++; return n; }
 
+  // Junta as leituras que são do MESMO pacote: código com um dígito a mais que
+  // bate com um código lido certo em outra captura, e códigos que diferem por
+  // um dígito só quando o nome do destinatário é o mesmo. Sem isso o dia fecha
+  // com pacote faltando e pacote fantasma ao mesmo tempo.
+  function lensConsolidar(brutos) {
+    var chaves = Object.keys(brutos), bons = {};
+    chaves.forEach(function (c) { if (c.length === 15) bons[c] = 1; });
+
+    function juntar(de, para) {
+      if (de === para || !brutos[de]) return;
+      var A = brutos[para], B = brutos[de];
+      if (!A) { brutos[para] = B; delete brutos[de]; return; }
+      A.nome = A.nome.concat(B.nome);
+      A.end = A.end.concat(B.end);
+      if (B.faixa) { A.faixa = true; if (!A.fim) A.fim = B.fim; if (B.ok) A.ok = true; if (!A.cru) A.cru = B.cru; }
+      delete brutos[de];
+    }
+
+    // dígito a mais: tirando um, bate com um código que veio certo?
+    chaves.forEach(function (c) {
+      if (c.length <= 15) return;
+      for (var i = 0; i < c.length; i++) {
+        var v = c.slice(0, i) + c.slice(i + 1);
+        if (v.length === 15 && bons[v]) { juntar(c, v); return; }
+      }
+    });
+
+    // dígito trocado: mesmo tamanho, uma posição diferente e MESMO nome.
+    // O nome é a trava — sem ele, dois pacotes de verdade poderiam ser
+    // fundidos num só, que é pior que o problema.
+    var restantes = Object.keys(brutos).filter(function (c) { return c.length === 15; });
+    var porPrefixo = {};
+    restantes.forEach(function (c) {
+      var p = c.slice(0, 8);
+      (porPrefixo[p] = porPrefixo[p] || []).push(c);
+    });
+    Object.keys(porPrefixo).forEach(function (p) {
+      var lista = porPrefixo[p];
+      for (var i = 0; i < lista.length; i++) {
+        for (var j = i + 1; j < lista.length; j++) {
+          var a = lista[i], b = lista[j];
+          if (!brutos[a] || !brutos[b]) continue;
+          var dif = 0;
+          for (var k = 0; k < 15; k++) if (a.charAt(k) !== b.charAt(k)) dif++;
+          if (dif !== 1) continue;
+          var na = (brutos[a].nome[0] || "").toLowerCase().replace(/\s+/g, "");
+          var nb = (brutos[b].nome[0] || "").toLowerCase().replace(/\s+/g, "");
+          if (na && nb && (na === nb || lensDist(na, nb) <= 2)) juntar(b, a);
+        }
+      }
+    });
+    return brutos;
+  }
+
   function lensInterpretar(textos) {
     var brutos = {};
     textos.forEach(function (txt) {
@@ -3100,6 +3159,8 @@
       return melhor;
     }
 
+    brutos = lensConsolidar(brutos);
+
     var regs = [];
     Object.keys(brutos).forEach(function (cod) {
       var L = brutos[cod], ruas = [], nums = [];
@@ -3116,7 +3177,8 @@
       regs.push({
         codigo: cod, nome: votar(L.nome), rua: votar(ruas),
         numero: (L.faixa && L.fim) ? L.fim : votar(nums),
-        faixa: L.faixa, faixaOk: L.ok, cru: L.cru
+        faixa: L.faixa, faixaOk: L.ok, cru: L.cru,
+        codigoTorto: cod.length !== 15
       });
     });
     return regs;
@@ -3176,6 +3238,9 @@
       '<button class="btn-primary" data-action="lens-montar" style="flex:1"' + (!L.capturas.length ? " disabled" : "") + '>Usar esta lista</button></div>';
 
     if (L.capturas.length) {
+      // Sem o texto cru não dá pra investigar um pacote que sumiu: em imagem
+      // não se roda nada. Este botão salva exatamente o que foi colado.
+      html += '<button class="btn-primary" data-action="lens-baixar" style="background:transparent;border:1px solid var(--line);color:var(--ink);opacity:.7;margin-bottom:8px">\u{1F4BE} Baixar o texto colado (pra investigar erro)</button>';
       html += '<button class="btn-primary" data-action="lens-limpar" style="background:transparent;border:1px solid var(--line);color:var(--ink);opacity:.7">Limpar as capturas</button>';
     }
     return html;
@@ -3217,6 +3282,8 @@
     var avisos = [];
     if (sumiram.length) avisos.push("ATENÇÃO: " + sumiram.length + " código(s) estão no texto colado mas não entraram na lista. Isso é falha do app, não sua — me mostre esta mensagem: " + sumiram.slice(0, 8).join(", ") + (sumiram.length > 8 ? " e mais " + (sumiram.length - 8) : ""));
     if (faltando.length) avisos.push(faltando.length + " pacote(s) ficaram sem endereço completo (o texto cortou o cartão no meio): " + faltando.map(function (r) { return r.codigo; }).join(", "));
+    var tortos = completos.filter(function (r) { return r.codigoTorto; });
+    if (tortos.length) avisos.push(tortos.length + " pacote(s) com o código lido fora dos 15 dígitos — o pacote está na lista, mas o bipe não vai casar até você corrigir o código: " + tortos.map(function (r) { return r.codigo + " (" + r.nome + ")"; }).join(" · "));
     if (conferir.length) avisos.push(conferir.length + " endereço(s) com faixa de numeração que o resto do endereço não confirmou — confira: " + conferir.map(function (r) { return r.rua + ", " + r.numero + " (" + r.nome + ")"; }).join(" · "));
     var esp = parseInt(L.esperado, 10);
     if (esp && completos.length < esp) avisos.push("A J&T mostra " + esp + " e saíram " + completos.length + ". Faltam " + (esp - completos.length) + " — dá pra voltar e colar mais capturas.");
@@ -3431,6 +3498,20 @@
     if (lensLimp) lensLimp.onclick = function () {
       if (!confirm("Apagar as capturas coladas?")) return;
       state.lens.capturas = []; state.lens.rascunho = ""; lensSalvar(); render();
+    };
+    var lensBaixar = app.querySelector('[data-action="lens-baixar"]');
+    if (lensBaixar) lensBaixar.onclick = function () {
+      var corpo = state.lens.capturas.map(function (t, i) {
+        return "===== CAPTURA " + (i + 1) + " =====\n" + t;
+      }).join("\n\n");
+      var cab = "total informado: " + (state.lens.esperado || "(nao informado)") +
+                "\ncapturas: " + state.lens.capturas.length +
+                "\nruas nas Faixas: " + state.mapaRuas.map(function (r) { return r.nome; }).join(" | ") + "\n\n";
+      var b = new Blob([cab + corpo], { type: "text/plain;charset=utf-8" });
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(b);
+      a.download = "capturas-" + dataDeHoje() + ".txt";
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
     };
     app.querySelectorAll('[data-action="lens-rm"]').forEach(function (el) {
       el.onclick = function () {
