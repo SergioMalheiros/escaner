@@ -251,7 +251,51 @@
 
   // ---------- fila de fotos pendentes (offline) ----------
   function idFila() { return "F" + Date.now() + "-" + Math.random().toString(36).slice(2, 8); }
-  function salvarFila() { salvar("fila-fotos-pendentes", state.filaPendente); }
+  // A fila inteira continua SEMPRE na memória (é ela que manda os reenvios).
+  // O que é limitado aqui é só a cópia guardada no armazenamento do celular,
+  // que é o que sobrevive se o Android descartar a aba. Guarda as mais
+  // ANTIGAS primeiro — são as que já falharam mais vezes e correm mais risco
+  // — e avisa na tela quando alguma foto ficou só na memória, porque nesse
+  // ponto ela é um comprovante de entrega que pode se perder.
+  function salvarFila() {
+    // Guarda o MÁXIMO de fotos que couber. Tenta a fila inteira primeiro (é o
+    // caso normal e é uma gravação só); se o armazenamento recusar, vai
+    // cortando pela metade até achar quanto cabe — sempre mantendo as mais
+    // ANTIGAS, que são as que já falharam mais vezes e correm mais risco.
+    var alvo = Math.min(state.filaPendente.length, filaMaxGuardada);
+    var guardou = -1;
+    var n = alvo;
+    while (n > 0) {
+      if (salvar("fila-fotos-pendentes", state.filaPendente.slice(0, n))) { guardou = n; break; }
+      n = Math.floor(n / 2);
+    }
+    if (guardou === -1) {
+      // Nem uma foto coube: grava lista vazia pra não deixar uma versão velha
+      // e enganosa da fila no armazenamento.
+      salvar("fila-fotos-pendentes", []);
+      guardou = 0;
+    } else if (guardou < alvo) {
+      // Cortar pela metade acha rápido um tamanho que cabe, mas costuma
+      // deixar espaço sobrando — e cada foto a mais guardada é um
+      // comprovante a menos correndo risco. Então sobe de volta procurando
+      // o maior que ainda cabe.
+      var baixo = guardou, alto = alvo;
+      while (alto - baixo > 1) {
+        var meio = Math.floor((baixo + alto) / 2);
+        if (salvar("fila-fotos-pendentes", state.filaPendente.slice(0, meio))) baixo = meio;
+        else alto = meio;
+      }
+      // Quando um setItem falha ele não escreve nada, então o que ficou
+      // guardado é sempre a última tentativa que deu certo — ou seja, "baixo".
+      guardou = baixo;
+    }
+    avisarFotosSoNaMemoria(state.filaPendente.length - guardou);
+  }
+  function avisarFotosSoNaMemoria(sobraram) {
+    state.avisoArmazenamento = sobraram > 0
+      ? sobraram + " foto(s) pendente(s) estão só na memória porque o armazenamento do celular encheu. Envie as pendentes agora — se o app for fechado antes, essas fotos se perdem."
+      : "";
+  }
   function removerDaFilaPorIdentidade(item) {
     state.filaPendente = state.filaPendente.filter(function (p) {
       if (p.tipo !== item.tipo) return true;
@@ -838,7 +882,24 @@
         var q = (state.entregaInfo[l.id] && state.entregaInfo[l.id].quemRecebeu) || "";
         if (q) nomesDiferentes[q] = true;
       });
-      if (Object.keys(nomesDiferentes).length > 1) aplicarQuemRecebeuEndereco(ruaNome, numero, "", true);
+      var qtdNomes = Object.keys(nomesDiferentes).length;
+      if (qtdNomes > 1) {
+        // Apagar nome de quem recebeu é apagar comprovante de entrega — e um
+        // toque errado nesse botão (ele fica logo acima do disparador da
+        // câmera) fazia isso calado, aqui e no Firebase, sem desfazer.
+        var confirmou = confirm(
+          "Voltar pra \"um nome pra todos\" vai APAGAR os " + qtdNomes + " nomes de quem recebeu já preenchidos neste número.\n\n" +
+          "Isso vale pra todo mundo da rota e não dá pra desfazer.\n\nApagar mesmo?"
+        );
+        if (!confirmou) {
+          // Desistiu: devolve o endereço pro modo loja por loja, que é onde
+          // ele estava antes do toque.
+          state.enderecosIndividuais[chaveEndereco] = true;
+          render();
+          return;
+        }
+        aplicarQuemRecebeuEndereco(ruaNome, numero, "", true);
+      }
     } else {
       state.enderecosIndividuais[chaveEndereco] = true;
     }
@@ -1003,6 +1064,17 @@
     // pior que deixar ele na caixa cinza, que pelo menos aparece.
     return candidatos.length === 1 ? candidatos[0] : null;
   }
+  // Um pedido com mais de uma peça vem da API da J&T como vários códigos
+  // irmãos: o mesmo rastreio de 15 dígitos com um sufixo de peça (-001, -002,
+  // ...). Cada peça é uma encomenda física de verdade, então cada uma é uma
+  // linha própria da lista — mas o código dela NÃO tem 15 dígitos limpos.
+  // Por isso o formato aceito em todo lugar é "15 dígitos, com sufixo de peça
+  // opcional", e comparar dois códigos é comparar a BASE deles: a etiqueta
+  // física às vezes traz o rastreio com o sufixo, às vezes só a base, e as
+  // duas formas têm que encontrar o pacote na lista.
+  var FORMATO_CODIGO = /^\d{15}(-\d{1,3})?$/;
+  function codigoBase(c) { return String(c == null ? "" : c).replace(/-\d{1,3}$/, ""); }
+
   function parseLinhas(texto) {
     return texto.split("\n").map(function (l) { return l.trim(); }).filter(Boolean).map(function (linha, idx) {
       var delim = linha.indexOf("\t") !== -1 ? "\t" : ",";
@@ -1021,7 +1093,7 @@
       var resto = partes.slice(2);
       var idxCodigo = -1;
       for (var i = resto.length - 1; i >= 0; i--) {
-        if (/^\d{15}$/.test(resto[i].replace(/\s+/g, ""))) { idxCodigo = i; break; }
+        if (FORMATO_CODIGO.test(resto[i].replace(/\s+/g, ""))) { idxCodigo = i; break; }
       }
       var codigo, nome;
       if (idxCodigo !== -1) {
@@ -1057,6 +1129,7 @@
     // Firebase disse. Usado pra não mentir "conectado" quando o sinal cai.
     conexaoViva: null,
     avisoEnvio: "",
+    avisoArmazenamento: "",
     totalRotas: 0,
     entregaInfo: {},
     fachadaInfo: {},
@@ -1083,9 +1156,22 @@
   function carregar(chave, padrao) {
     try { var v = localStorage.getItem(chave); return v ? JSON.parse(v) : padrao; } catch (e) { return padrao; }
   }
+  // Devolve se conseguiu mesmo gravar. O armazenamento do navegador no
+  // Android é pequeno (uns 5 MB) e as fotos pendentes vão pra lá em base64 —
+  // quando ele enche, o setItem passa a FALHAR. Antes esse erro era engolido
+  // em silêncio: as fotos da fila paravam de ser guardadas (se o Android
+  // descartasse a aba, sumiam de vez) e, pior, o progresso do dia inteiro
+  // — separados/entregues — também parava de ser salvo sem ninguém saber.
   function salvar(chave, valor) {
-    try { localStorage.setItem(chave, JSON.stringify(valor)); } catch (e) { /* ignora */ }
+    try { localStorage.setItem(chave, JSON.stringify(valor)); return true; }
+    catch (e) { return false; }
   }
+  // Teto de itens que a cópia guardada da fila pode ter. Começa sem limite
+  // (a fila usa todo o espaço que houver — foto pendente é comprovante de
+  // entrega) e só é apertado se o progresso do dia chegar a não caber por
+  // causa dela. Assim as fotos ficam com o máximo possível, mas nunca à
+  // custa do progresso do dia.
+  var filaMaxGuardada = Infinity;
   function salvarMapa() {
     salvar("mapa-ruas", state.mapaRuas);
     enviarFaixasParaNuvem();
@@ -1197,7 +1283,23 @@
     // "dia" carimba de quando é essa sessão: sem ele, a lista de ontem
     // voltava na tela hoje de manhã como se fosse a de hoje, com o contador
     // de ontem junto.
-    salvar("sessao-atual", { dia: dataDeHoje(), texto: state.textoColado, linhas: state.linhasParseadas, pacoteStatus: state.pacoteStatus, enderecosIndividuais: state.enderecosIndividuais });
+    var ok = salvar("sessao-atual", { dia: dataDeHoje(), texto: state.textoColado, linhas: state.linhasParseadas, pacoteStatus: state.pacoteStatus, enderecosIndividuais: state.enderecosIndividuais });
+    if (!ok) {
+      // O progresso do dia é a coisa mais cara de perder: são horas de
+      // separação e entrega que ninguém refaz de memória. Se não coube, abre
+      // espaço jogando fora a cópia guardada das fotos pendentes (elas
+      // continuam na memória e na fila de reenvio) e tenta de novo. E aperta
+      // o teto da fila, senão ela volta a encher o espaço na próxima foto e
+      // o progresso fica nesse empurra-empurra o dia inteiro.
+      var guardadasAntes = (carregar("fila-fotos-pendentes", []) || []).length;
+      salvar("fila-fotos-pendentes", []);
+      filaMaxGuardada = Math.max(0, Math.floor(guardadasAntes / 2));
+      ok = salvar("sessao-atual", { dia: dataDeHoje(), texto: state.textoColado, linhas: state.linhasParseadas, pacoteStatus: state.pacoteStatus, enderecosIndividuais: state.enderecosIndividuais });
+      salvarFila();
+    }
+    if (!ok) {
+      state.avisoArmazenamento = "O armazenamento do celular está cheio e o progresso de hoje NÃO está sendo salvo neste aparelho. Se o app fechar, o que foi separado/entregue se perde. Envie as fotos pendentes e, se continuar, limpe dados de outros sites no navegador.";
+    }
   }
 
   // Foco a restaurar depois de tirar uma foto. A câmera nativa do celular tira
@@ -1509,15 +1611,21 @@
       if (editando && editando.tagName === "INPUT" && editando.getAttribute("data-action") &&
           editando.getAttribute("data-action").indexOf("quem-recebeu") === 0) {
         var idEditando = editando.getAttribute("data-id");
-        if (idEditando && novo[idEditando]) {
+        // Pacote que ainda não tem registro na nuvem (primeira entrega do dia,
+        // nada subiu ainda) não existe em "novo" — antes isso fazia o que
+        // estava sendo digitado ser descartado justamente no caso mais comum.
+        // Agora a entrada é criada pra segurar o texto.
+        if (idEditando) {
+          if (!novo[idEditando]) novo[idEditando] = { quemRecebeu: "", fotos: [] };
           novo[idEditando].quemRecebeu = editando.value;
-        } else if (!idEditando) {
+        } else {
           // campo do endereço inteiro: preserva em todas as linhas daquele nº
           var ruaEd = editando.getAttribute("data-rua");
           var numEd = editando.getAttribute("data-numero");
           if (ruaEd != null && numEd != null) {
             linhasDoEndereco(ruaEd, numEd).forEach(function (l) {
-              if (novo[l.id]) novo[l.id].quemRecebeu = editando.value;
+              if (!novo[l.id]) novo[l.id] = { quemRecebeu: "", fotos: [] };
+              novo[l.id].quemRecebeu = editando.value;
             });
           }
         }
@@ -1627,6 +1735,8 @@
       // Já é exatamente essa lista: nada a fazer (evita re-render à toa e
       // volta-e-meia depois do próprio envio).
       if (texto === state.textoColado && state.linhasParseadas) return;
+      // Lista que esta pessoa já disse que não queria: não pergunta de novo.
+      if (listasRecusadas[texto]) return;
 
       // Este aparelho JÁ está trabalhando numa lista e chegou outra da nuvem
       // (um colega organizou "a parte dele", que é o instinto natural quando
@@ -1646,7 +1756,12 @@
         );
         if (!trocar) {
           // Fica com a lista daqui e devolve ela pra nuvem, pra não ficar
-          // um aparelho de cada jeito.
+          // um aparelho de cada jeito. Mas ANOTA qual lista foi recusada:
+          // sem isso os dois aparelhos entravam num pingue-pongue sem fim —
+          // cada "Cancelar" reenviava a lista daqui, o que fazia a pergunta
+          // aparecer no celular do colega, que cancelava e devolvia a dele, e
+          // assim por diante, com os dois travados em caixa de diálogo.
+          listasRecusadas[texto] = true;
           enviarListaParaNuvem();
           return;
         }
@@ -1664,6 +1779,11 @@
     };
     refListaAtual.on("value", callbackListaAtual);
   }
+
+  // Listas da nuvem que esta pessoa já recusou nesta sessão (ver
+  // callbackListaAtual). Some ao recarregar o app, que é quando faz sentido
+  // perguntar de novo.
+  var listasRecusadas = {};
 
   function salvarMinhaRota(rota) {
     state.minhaRota = rota;
@@ -2216,11 +2336,15 @@
     // aviso de "não encontrado" pra quem não é pacote, dois filtros
     // redundantes de propósito (reforço, a pedido do Sérgio):
     // 1) ignora por completo qualquer código de 44 dígitos;
-    // 2) só segue adiante quem tem exatamente 15 dígitos — qualquer outro
-    //    tamanho (incluindo o de 44) é tratado como se a câmera não tivesse
-    //    lido nada: sem aviso, sem beep, sem interromper a leitura.
+    // 2) só segue adiante quem tem o formato de rastreio — 15 dígitos, com o
+    //    sufixo de peça (-001, -002...) opcional, porque pedido com mais de
+    //    uma peça é exatamente assim que vem da API e é assim que a etiqueta
+    //    pode estar impressa. Qualquer outro formato (incluindo o de 44) é
+    //    tratado como se a câmera não tivesse lido nada: sem aviso, sem beep,
+    //    sem interromper a leitura.
     if (/^\d{44}$/.test(codigo)) return;
-    if (!/^\d{15}$/.test(codigo)) return;
+    codigo = String(codigo).trim();
+    if (!FORMATO_CODIGO.test(codigo)) return;
 
     var agora = Date.now();
 
@@ -2243,7 +2367,16 @@
     // linha AINDA NÃO separada daquele código (se houver uma), então cada
     // encomenda física com o código repetido avança uma linha diferente em
     // vez de martelar sempre a mesma.
+    // Primeiro tenta o código exato; se não houver, casa pela BASE do rastreio.
+    // É isso que faz um pedido de 5 peças funcionar: a lista tem -001..-005 e
+    // a etiqueta na mão pode trazer qualquer uma dessas formas (ou só a base).
+    // Como logo abaixo a escolha é sempre por uma linha AINDA NÃO separada,
+    // bipar as 5 encomendas físicas marca as 5 linhas, uma de cada vez.
     var candidatas = state.linhasParseadas.filter(function (l) { return !l.erro && l.codigo && l.codigo === codigo; });
+    if (!candidatas.length) {
+      var base = codigoBase(codigo);
+      candidatas = state.linhasParseadas.filter(function (l) { return !l.erro && l.codigo && codigoBase(l.codigo) === base; });
+    }
     if (!candidatas.length) {
       if (ultimoScan.chave === codigo && agora - ultimoScan.ts < 2500) return;
       ultimoScan = { chave: codigo, ts: agora };
@@ -2388,6 +2521,19 @@
     navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }
     }).then(function (stream) {
+      // Pedir a câmera leva alguns décimos de segundo. Se nesse meio-tempo a
+      // pessoa já trocou de aba (ou abriu a câmera de foto), a câmera que
+      // chegou agora não tem mais tela nenhuma pra mostrar: sem isso ela
+      // ficava LIGADA em segundo plano, gastando bateria, com o laço de
+      // leitura girando à toa procurando um <video> que não existe mais.
+      if (state.aba !== "escanear" || state.loteFoto) {
+        stream.getTracks().forEach(function (t) { t.stop(); });
+        // Volta pro botão "iniciar câmera" em vez de deixar "pedindo acesso"
+        // congelado na tela pra quando a pessoa voltar.
+        state.statusCamera = "idle";
+        render();
+        return;
+      }
       streamAtual = stream;
       state.statusCamera = ("BarcodeDetector" in window) ? "ativa" : "sem-suporte";
       render();
@@ -2449,12 +2595,56 @@
     render();
   }
 
+  // Guarda o campo que está sendo digitado ANTES de refazer a tela: o
+  // innerHTML destrói o <input> focado, e com ele o texto que a pessoa estava
+  // digitando e a posição do cursor. Sem isso, qualquer novidade da nuvem
+  // (uma foto do colega, o contador global subindo) apagava o que estava
+  // sendo escrito e fechava o teclado no meio.
+  function guardarFoco(app) {
+    var ativo = document.activeElement;
+    if (!ativo || (ativo.tagName !== "INPUT" && ativo.tagName !== "TEXTAREA") || !app.contains(ativo)) return null;
+    return {
+      id: ativo.id || null,
+      acao: ativo.getAttribute("data-action"),
+      idAlvo: ativo.getAttribute("data-id"),
+      rua: ativo.getAttribute("data-rua"),
+      numero: ativo.getAttribute("data-numero"),
+      valor: ativo.value,
+      inicio: ativo.selectionStart,
+      fim: ativo.selectionEnd
+    };
+  }
+  function restaurarFoco(app, focoSalvo) {
+    if (!focoSalvo) return;
+    var alvo = null;
+    if (focoSalvo.id) alvo = document.getElementById(focoSalvo.id);
+    if (!alvo && focoSalvo.acao) {
+      var sel = '[data-action="' + focoSalvo.acao + '"]';
+      if (focoSalvo.idAlvo) sel += '[data-id="' + focoSalvo.idAlvo + '"]';
+      else if (focoSalvo.rua != null && focoSalvo.numero != null) sel += '[data-rua="' + focoSalvo.rua + '"][data-numero="' + focoSalvo.numero + '"]';
+      try { alvo = app.querySelector(sel); } catch (e) { alvo = null; }
+    }
+    if (!alvo) return;
+    // O que a pessoa digitou manda: se o valor remontado veio diferente
+    // (dado da nuvem chegando no meio da digitação), o texto dela volta.
+    if (alvo.value !== focoSalvo.valor) alvo.value = focoSalvo.valor;
+    alvo.focus();
+    try { alvo.setSelectionRange(focoSalvo.inicio, focoSalvo.fim); } catch (e) { /* input que não aceita seleção */ }
+  }
+
   function render() {
     var app = document.getElementById("app");
 
     if (state.loteFoto) {
+      // Esta tela também é refeita inteira por qualquer novidade da nuvem
+      // (foto do colega subindo, contador global andando) e tem campo de
+      // texto dentro — então precisa da MESMA proteção do caminho normal,
+      // senão o nome de quem recebeu some no meio da digitação e o teclado
+      // fecha. Antes esse "return" pulava a restauração lá de baixo.
+      var focoLote = guardarFoco(app);
       app.innerHTML = renderLoteFoto();
       attachHandlersLote();
+      restaurarFoco(app, focoLote);
       var vLote = document.getElementById("videoLote");
       if (vLote && streamLote && vLote.srcObject !== streamLote) {
         vLote.srcObject = streamLote;
@@ -2476,6 +2666,10 @@
         ? '<p style="font-size:12px;margin:4px 0 0;color:var(--alert);font-weight:600">\u26a0\ufe0f sem sinal agora \u2014 o trabalho fica guardado aqui e sobe sozinho quando voltar</p>' : "") +
       (state.filaPendente.length > 0 ? '<p style="font-size:12px;margin:4px 0 0;color:var(--accent-deep);font-weight:600">\u23f3 ' + state.filaPendente.length + " " + plural(state.filaPendente.length, "foto pendente de envio", "fotos pendentes de envio") + "</p>" : "") +
       (state.avisoEnvio ? '<p style="font-size:12px;margin:4px 0 0;color:var(--alert);font-weight:600">' + esc(state.avisoEnvio) + "</p>" : "") +
+      // Armazenamento cheio é silencioso por natureza (o navegador só recusa
+      // de volta), então precisa gritar aqui em cima: o que está em risco é
+      // comprovante de entrega e o progresso do dia.
+      (state.avisoArmazenamento ? '<p style="font-size:12px;margin:6px 0 0;color:var(--alert);font-weight:700;line-height:1.4">⚠️ ' + esc(state.avisoArmazenamento) + "</p>" : "") +
       "</header>";
 
     html += '<div class="tabs">' +
@@ -2506,20 +2700,7 @@
     // pessoa estava digitando e a posição do cursor. Sem isso, qualquer
     // novidade da nuvem (uma foto do colega, o contador global subindo)
     // apagava o que estava sendo escrito e fechava o teclado no meio.
-    var ativo = document.activeElement;
-    var focoSalvo = null;
-    if (ativo && (ativo.tagName === "INPUT" || ativo.tagName === "TEXTAREA") && app.contains(ativo)) {
-      focoSalvo = {
-        id: ativo.id || null,
-        acao: ativo.getAttribute("data-action"),
-        idAlvo: ativo.getAttribute("data-id"),
-        rua: ativo.getAttribute("data-rua"),
-        numero: ativo.getAttribute("data-numero"),
-        valor: ativo.value,
-        inicio: ativo.selectionStart,
-        fim: ativo.selectionEnd
-      };
-    }
+    var focoSalvo = guardarFoco(app);
 
     html += renderVisualizadorFoto();
 
@@ -2527,23 +2708,7 @@
 
     attachHandlers();
 
-    if (focoSalvo) {
-      var alvo = null;
-      if (focoSalvo.id) alvo = document.getElementById(focoSalvo.id);
-      if (!alvo && focoSalvo.acao) {
-        var sel = '[data-action="' + focoSalvo.acao + '"]';
-        if (focoSalvo.idAlvo) sel += '[data-id="' + focoSalvo.idAlvo + '"]';
-        else if (focoSalvo.rua != null && focoSalvo.numero != null) sel += '[data-rua="' + focoSalvo.rua + '"][data-numero="' + focoSalvo.numero + '"]';
-        try { alvo = app.querySelector(sel); } catch (e) { alvo = null; }
-      }
-      if (alvo) {
-        // O que a pessoa digitou manda: se o valor remontado veio diferente
-        // (dado da nuvem chegando no meio da digitação), o texto dela volta.
-        if (alvo.value !== focoSalvo.valor) alvo.value = focoSalvo.valor;
-        alvo.focus();
-        try { alvo.setSelectionRange(focoSalvo.inicio, focoSalvo.fim); } catch (e) { /* input que não aceita seleção */ }
-      }
-    }
+    restaurarFoco(app, focoSalvo);
     if (state.aba === "escanear" && streamAtual) {
       var v2 = document.getElementById("video");
       if (v2 && v2.srcObject !== streamAtual) {
@@ -2606,7 +2771,11 @@
     if (!ehFachada && !lojaPorLojaLote) {
       // Prédio: um nome só (o porteiro) vale pro número inteiro — ninguém
       // confere nome por nome na portaria. Fachada não pergunta isso.
-      html += '<input id="quemRecebeuLoteInput" value="' + esc(quemRecebeuLote) + '" placeholder="Quem recebeu esse lote? (ex: porteiro)" style="width:100%;font-size:13px;padding:8px 10px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light);margin-bottom:12px;box-sizing:border-box" />';
+      // data-action/data-rua/data-numero não são decoração: é por eles que o
+      // callback do Firebase reconhece que ESTE campo está sendo digitado e
+      // não pode ser trocado pelo valor que veio da nuvem (ver
+      // callbackEntregasAtual). Sem isso o nome sumia no meio da digitação.
+      html += '<input id="quemRecebeuLoteInput" data-action="quem-recebeu-lote" data-rua="' + esc(lote.ruaNome) + '" data-numero="' + esc(lote.numero) + '" value="' + esc(quemRecebeuLote) + '" placeholder="Quem recebeu esse lote? (ex: porteiro)" style="width:100%;font-size:13px;padding:8px 10px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light);margin-bottom:12px;box-sizing:border-box" />';
     }
 
     if (lote.statusCamera === "pedindo") {
