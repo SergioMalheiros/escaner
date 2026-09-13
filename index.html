@@ -1046,7 +1046,7 @@
     aba: "escanear",
     mapaRuas: [],
     textoColado: "",
-    lens: { aberto: false, capturas: [], esperado: "", rascunho: "" },
+    jsonImport: { aberto: false, rascunho: "" },
     linhasParseadas: null,
     pacoteStatus: {},
     novoNomeRua: "",
@@ -1213,16 +1213,10 @@
   }
 
   state.mapaRuas = normalizarMapaRuas(carregar("mapa-ruas", []));
-  // as capturas ficam guardadas: buscar cada pedaço no Lens obriga a sair do
-  // navegador, e o Android descarta a aba enquanto a pessoa está fora
-  (function () {
-    var g = carregar("lens-capturas", null);
-    if (g && g.capturas) {
-      state.lens.capturas = g.capturas;
-      state.lens.esperado = g.esperado || "";
-      state.lens.rascunho = g.rascunho || "";
-    }
-  })();
+  // o texto colado da API pode ser grande; guarda pra sobreviver se o Android
+  // descartar a aba enquanto a pessoa vai buscar o JSON no proxy
+  state.jsonImport.rascunho = carregar("json-import-rascunho", "");
+  try { localStorage.removeItem("lens-capturas"); } catch (e) { /* ignora */ }
   state.contadorGlobal = carregar("contador-pacotes-total", 0);
   state.minhaRota = carregar("minha-rota", "");
   state.filaPendente = carregar("fila-fotos-pendentes", []);
@@ -2928,388 +2922,278 @@
   }
 
 
-  // ===================== Colar do Google Lens =====================
-  // A J&T não libera PDF nem planilha da lista do dia. O caminho que sobrou é
-  // capturar a tela do app deles e passar o Google Lens, que devolve o texto
-  // exato (não uma leitura dele). Aqui esse texto vira as linhas que a caixa
-  // de sempre já aceita — parseLinhas e "Organizar pacotes" continuam iguais.
-  var LENS_COMPL = "(?:apt?o?|apart(?:amento)?|casa|cs|loja|lj|bloco|bl|sala|sl|andar|and|quadra|qd|lote|lt|fundos|sobrado)";
-  var LENS_TIPO  = "(?:rua|avenida|av\\.?|travessa|trav\\.?|estrada|est\\.?|pra[cç]a|alameda|al\\.?|largo|rodovia|r\\.)";
-  var LENS_DATA  = /20\d\d-\d\d-\d\d/;
-  // O Lens erra dígito do código: cola um a mais ("999881999515503" vira
-  // "9998819995155030") ou troca um. Exigindo exatamente 15 dígitos, o pacote
-  // com dígito a mais ficava INVISÍVEL, e o com dígito trocado virava um
-  // pacote fantasma. Aceito de 14 a 17 e conserto depois, comparando com os
-  // códigos que vieram certos.
-  var LENS_COD   = /\b(\d{14,17})\b/;
-  var LENS_CODG  = /\b(\d{14,17})\b/g;
-  // "de 145 a 191", "107 a 143", "100 a 150": faixa de numeração dos Correios.
-  // O número da casa é o FIM da faixa, no lado par e no ímpar.
-  var LENS_FAIXA = /\b(?:de\s+)?(\d{1,5})\s+a\s+(\d{1,5})\b/gi;
-  var LENS_LADO  = /[\s-]*lado\s*[íi]?mpar\b|[\s-]*lado\s*par\b|[\s-]*\b[íi]mpar\b/gi;
-  // o Lens troca letra latina por grega/cirílica parecida ("FAINASANTΑΝΑ")
-  var LENS_CONF = { "Α":"A","Β":"B","Ε":"E","Ζ":"Z","Η":"H","Ι":"I","Κ":"K","Μ":"M","Ν":"N","Ο":"O",
-                    "Ρ":"P","Τ":"T","Υ":"Y","Χ":"X","α":"a","ε":"e","ο":"o","ρ":"p","τ":"t",
-                    "А":"A","В":"B","Е":"E","К":"K","М":"M","Н":"H","О":"O","Р":"P","С":"C","Т":"T",
-                    "У":"Y","Х":"X","а":"a","е":"e","о":"o","р":"p","с":"c","у":"y","х":"x" };
-  // ele também erra a grafia do rótulo dos próprios botões: "novegapão",
-  // "telekone", "avegação". Comparar por semelhança pega todas as variantes.
-  var LENS_RUIDO = ["navegacao", "telefone", "whatsapp", "assinar", "roteirizacao"];
+  // ===================== Importar JSON da API do J&T =====================
+  // A J&T não libera PDF nem planilha da lista do dia, e a leitura de texto
+  // (print/vídeo de tela, Google Lens) sempre teve risco de erro — a rota real
+  // de dados é interceptar o próprio app J&T Outfield com um proxy (fora
+  // desta ferramenta) e colar aqui a resposta JSON do endpoint que devolve a
+  // lista completa do dia. É o dado que o servidor da J&T manda de verdade,
+  // sem nenhuma leitura visual envolvida, então não erra dígito nem letra.
+  var IMPJ_TIPO = "(?:rua|avenida|av\\.?|travessa|trav\\.?|estrada|alameda|al\\.?|pra[cç]a|largo|rodovia)";
+  var IMPJ_JUNK = { "icarai": 1, "icaraí": 1, ".": 1, "": 1, "nao informado": 1, "não informado": 1 };
 
-  function lensDist(a, b) {
-    if (Math.abs(a.length - b.length) > 3) return 99;
-    var ant = [], i, j;
-    for (j = 0; j <= b.length; j++) ant[j] = j;
-    for (i = 1; i <= a.length; i++) {
-      var at = [i];
-      for (j = 1; j <= b.length; j++) {
-        at[j] = Math.min(ant[j] + 1, at[j - 1] + 1, ant[j - 1] + (a.charAt(i - 1) !== b.charAt(j - 1) ? 1 : 0));
-      }
-      ant = at;
-    }
-    return ant[b.length];
+  function impjLimparRua(s) {
+    if (!s) return "";
+    s = s.replace(/-?\s*lado\s*[íi]mpar/gi, "");
+    s = s.replace(/-?\s*lado\s*par/gi, "");
+    s = s.replace(/\s*-?\s*de\s*\d+\s*(?:a|ao)\s*\d+\s*(?:fim)?/gi, "");
+    s = s.replace(/\s*-\s*trade\s*center.*$/gi, "");
+    s = s.replace(/^\s*icara[ií];?\s*/gi, "");
+    s = s.replace(/\(cpf.*?\)/gi, "");
+    s = s.replace(/\s+/g, " ").trim();
+    return s.replace(/^[\s;,.\-]+|[\s;,.\-]+$/g, "");
   }
-  function lensSemConf(t) { return t.replace(/[Ͱ-ϿЀ-ӿ]/g, function (c) { return LENS_CONF[c] || c; }); }
-  function lensEhRuido(tk) {
-    var t = normalizar(tk).replace(/[^a-z]/g, "");
-    if (t.length < 5) return false;
-    for (var i = 0; i < LENS_RUIDO.length; i++) {
-      if (lensDist(t, LENS_RUIDO[i]) <= Math.max(2, Math.floor(LENS_RUIDO[i].length / 4))) return true;
-    }
-    return false;
+  function impjRuaValida(s) {
+    var s2 = impjLimparRua(s);
+    if (!s2) return false;
+    if (IMPJ_JUNK[s2.toLowerCase()]) return false;
+    if (s2.length < 4) return false;
+    if (/^\s*(?:apto|ap\.?|bloco|bl\.?)\b/i.test(s2)) return false;
+    return true;
   }
-  function lensTiraRuido(t) {
-    return t.split(/\s+/).map(function (tk) { return lensEhRuido(tk) ? "" : tk; }).join(" ").trim();
+  function impjNumeroValido(s) {
+    if (!s) return null;
+    s = s.trim();
+    var m = s.match(/^(\d{1,5}[A-Za-z]?)$/);
+    if (!m) return null;
+    if (m[1].replace(/^0+/, "") === "") return null;
+    return m[1];
   }
-  function lensTitulo(t) {
-    var min = { e:1, de:1, da:1, do:1, dos:1, das:1, a:1, o:1 };
-    return t.split(/\s+/).map(function (p, i) {
-      var pl = p.toLowerCase();
-      return (i > 0 && min[pl]) ? pl : pl.charAt(0).toUpperCase() + pl.slice(1);
-    }).join(" ");
-  }
-
-  var lensFaixa = false, lensFimFaixa = "", lensFaixaOk = false;
-  function lensLimpar(t) {
-    t = lensTiraRuido(t);
-    t = t.replace(/\(\s*\d\s*\)/g, " ");                 // o ícone do botão vira "(1)"
-    t = t.replace(/\bNiter[oó]i\b[\s\S]*$/i, "");
-    // ICARAI às vezes vem na FRENTE ("Icarai, Rua Mariz e Barros: 491"), não só
-    // no fim como bairro — cortar a partir dele apagava o endereço inteiro
-    t = t.replace(/\bICARA\w*\b/gi, " ");
-    t = t.replace(/\b\d{8}\b/g, " ");
-    LENS_FAIXA.lastIndex = 0;
-    lensFaixa = LENS_FAIXA.test(t);
-    lensFimFaixa = ""; lensFaixaOk = false;
-    if (lensFaixa) {
-      LENS_FAIXA.lastIndex = 0;
-      var mf, fins = [];
-      while ((mf = LENS_FAIXA.exec(t)) !== null) fins.push(mf[2]);
-      lensFimFaixa = fins.length ? fins[fins.length - 1] : "";
-      // o resto do endereço costuma repetir o número certo: quando repete, é
-      // confirmação; quando não, é onde mora o endereço digitado errado
-      if (lensFimFaixa) lensFaixaOk = new RegExp("\\b" + lensFimFaixa + "\\b").test(t.replace(LENS_FAIXA, " "));
-    }
-    t = t.replace(LENS_FAIXA, " ").replace(LENS_LADO, " ");
-    t = t.replace(new RegExp("\\s*\\b" + LENS_COMPL + "\\.?\\s*n?[º°]?\\s*\\d+[A-Za-z]?\\b", "gi"), " ");
-    t = t.replace(/\s*(?:apt?o?|apart(?:amento)?|casa|loja|bloco|sala)\.?\s*n?[º°]?\s*\d+[A-Za-z]?\b/gi, " ");
-    t = t.replace(new RegExp("\\b" + LENS_COMPL + "\\b", "gi"), " ");
-    t = t.replace(/\bde\s+(?=\d)/gi, " ");
-    t = t.replace(/[^\w\sáàâãéêíóôõúüçÁÀÂÃÉÊÍÓÔÕÚÜÇ;,.-]/g, " ");
-    return t.replace(/\s+/g, " ").replace(/^[\s;,.-]+|[\s;,.-]+$/g, "");
-  }
-
-  function lensVias(end) {
-    // a J&T repete o endereço dentro do próprio campo, então um pedaço só já
-    // traz duas leituras independentes do mesmo número
-    var re = new RegExp("\\b(" + LENS_TIPO + ")\\s+((?:(?!\\b" + LENS_COMPL + "\\b)[^;,\\d\\n]){2,60}?)[\\s;,.-]+(\\d{1,5})\\b", "gi");
-    var m, out = [];
-    while ((m = re.exec(end)) !== null) {
-      var tp = m[1].replace(/\.$/, "").toLowerCase();
-      tp = ({ r:"rua", av:"avenida", al:"alameda", est:"estrada", trav:"travessa" })[tp] || tp;
-      out.push([lensTitulo(tp) + " " + lensTitulo(m[2].replace(/\s+/g, " ").replace(/^[\s;,.-]+|[\s;,.-]+$/g, "")), m[3]]);
-    }
-    if (out.length) return out;
-    // Endereço que chega sem o "Rua" na frente ("O Ator Paulo Gustavo, 155",
-    // "Mariz e Barros 126"): procura pelo nome das ruas que já estão nas
-    // Faixas e pega o número logo depois. Sem isso o pacote ficava sem rua.
-    var alvo = normalizar(end);
-    for (var i = 0; i < state.mapaRuas.length; i++) {
-      var nucleo = partesRua(state.mapaRuas[i].nome).nucleo;
-      if (!nucleo || nucleo.length < 4) continue;
-      var pos = alvo.indexOf(nucleo);
-      if (pos < 0) continue;
-      var mn = end.slice(pos + nucleo.length).match(new RegExp("^[\\s;,.-]*(?!\\b" + LENS_COMPL + "\\b)(\\d{1,5})\\b", "i"));
-      if (mn) return [[state.mapaRuas[i].nome, mn[1]]];
-    }
-    return out;
-  }
-
-  function lensCodigosDe(txt) {
-    var s = {}, m; LENS_CODG.lastIndex = 0;
-    while ((m = LENS_CODG.exec(txt)) !== null) s[m[1]] = 1;
+  function impjPrefixoRua(s) {
+    s = impjLimparRua(s);
+    if (!s) return s;
+    if (!new RegExp("^" + IMPJ_TIPO + "\\b", "i").test(s)) s = "Rua " + s;
     return s;
   }
-  function lensEmComum(a, b) { var n = 0; for (var k in a) if (b[k]) n++; return n; }
+  function impjNormalizarNumero(n) {
+    if (!n) return n;
+    var m = n.match(/^0*(\d+)([A-Za-z]?)$/);
+    if (!m) return n;
+    return (m[1] || "0") + m[2];
+  }
 
-  // Junta as leituras que são do MESMO pacote: código com um dígito a mais que
-  // bate com um código lido certo em outra captura, e códigos que diferem por
-  // um dígito só quando o nome do destinatário é o mesmo. Sem isso o dia fecha
-  // com pacote faltando e pacote fantasma ao mesmo tempo.
-  function lensConsolidar(brutos) {
-    var chaves = Object.keys(brutos), bons = {};
-    chaves.forEach(function (c) { if (c.length === 15) bons[c] = 1; });
+  // Extrai rua+número de UM pacote do JSON, tentando várias estratégias na
+  // ordem — o endereço da J&T vem consistente na maior parte, mas com um bom
+  // tanto de bagunça: campo de rua com o bairro em vez da rua, formato com
+  // ";", número escondido no fim ou no início do campo de detalhe, etc.
+  function impjExtrairRegistro(p) {
+    var nome = p.receiverName || "";
+    var ruaRaw = (p.receiverStreet || "").trim();
+    var numRaw = (p.receiverStreetNum || "").trim();
+    var det = (p.receiverDetailedAddress || "").trim();
 
-    function juntar(de, para) {
-      if (de === para || !brutos[de]) return;
-      var A = brutos[para], B = brutos[de];
-      if (!A) { brutos[para] = B; delete brutos[de]; return; }
-      A.nome = A.nome.concat(B.nome);
-      A.end = A.end.concat(B.end);
-      if (B.faixa) { A.faixa = true; if (!A.fim) A.fim = B.fim; if (B.ok) A.ok = true; if (!A.cru) A.cru = B.cru; }
-      delete brutos[de];
+    function reg(rua, numero, metodo) {
+      return {
+        nome: nome, rua: rua, numero: numero, metodo: metodo,
+        ruaRaw: p.receiverStreet, streetnumRaw: p.receiverStreetNum, detRaw: p.receiverDetailedAddress
+      };
     }
 
-    // dígito a mais: tirando um, bate com um código que veio certo?
-    chaves.forEach(function (c) {
-      if (c.length <= 15) return;
-      for (var i = 0; i < c.length; i++) {
-        var v = c.slice(0, i) + c.slice(i + 1);
-        if (v.length === 15 && bons[v]) { juntar(c, v); return; }
+    // campos trocados: rua_raw é só bairro, mas o detalhe traz a rua de
+    // verdade e o número já vem certo no campo de número
+    if (!impjRuaValida(ruaRaw)) {
+      var nSwap = impjNumeroValido(numRaw);
+      var mSwap = det.match(new RegExp("^\\s*(" + IMPJ_TIPO + "[^\\d,]*)\\s*$", "i"));
+      if (nSwap && mSwap) return reg(impjPrefixoRua(mSwap[1]), nSwap, "campos-trocados");
+    }
+
+    // formato "Bairro;Rua;Número+complemento"
+    var alvoPv = ruaRaw.indexOf(";") !== -1 ? ruaRaw : (det.indexOf(";") !== -1 ? det : "");
+    if (alvoPv.indexOf(";") !== -1) {
+      var partes = alvoPv.split(";").map(function (x) { return x.trim(); }).filter(Boolean);
+      var ruaCand = null, resto = null, tipoRe = new RegExp("\\b" + IMPJ_TIPO + "\\b", "i");
+      for (var i = 0; i < partes.length; i++) {
+        if (tipoRe.test(partes[i])) { ruaCand = partes[i]; resto = partes[i + 1] || ""; break; }
+      }
+      if (!ruaCand && partes.length >= 2) { ruaCand = partes[partes.length - 2]; resto = partes[partes.length - 1]; }
+      if (ruaCand) {
+        var mpv = (resto || "").match(/^\s*(\d{1,5}[A-Za-z]?)/);
+        if (mpv && impjRuaValida(ruaCand)) return reg(impjPrefixoRua(ruaCand), mpv[1], "pv");
+      }
+    }
+
+    if (!impjRuaValida(ruaRaw)) {
+      var mdt = det.match(new RegExp("^\\s*(" + IMPJ_TIPO + "[^,]*?)[,\\s]+(\\d{1,5}[A-Za-z]?)\\b", "i"));
+      if (mdt) return reg(impjPrefixoRua(mdt[1]), mdt[2], "det-tem-rua");
+      return reg(null, null, "falhou");
+    }
+
+    var n = impjNumeroValido(numRaw);
+    if (n) return reg(impjPrefixoRua(ruaRaw), n, "streetnum");
+
+    // o campo de rua às vezes vem com o nome de um comércio colado depois do
+    // número ("Rua Guilherme Geenhalch 16 Lanchonete..."), e o detalhe traz só
+    // esse mesmo número sozinho — nesse caso a rua de verdade é só o pedaço
+    // antes do número.
+    var detSoNum = det.match(/^(\d{1,5}[A-Za-z]?)$/);
+    if (detSoNum) {
+      var posNum = ruaRaw.search(new RegExp("\\b" + detSoNum[1] + "\\b"));
+      if (posNum > 0) {
+        var ruaCortada = ruaRaw.slice(0, posNum);
+        if (impjRuaValida(ruaCortada)) return reg(impjPrefixoRua(ruaCortada), detSoNum[1], "rua-com-lixo");
+      }
+    }
+
+    var mnum = (ruaRaw + " " + det).match(/n[uú]mero:?\s*(\d{1,5}[A-Za-z]?)/i);
+    if (mnum) return reg(impjPrefixoRua(ruaRaw.replace(/n[uú]mero:?\s*\d{1,5}[A-Za-z]?/gi, "")), mnum[1], "numero:");
+
+    var m2 = ruaRaw.match(new RegExp("^(" + IMPJ_TIPO + "[^,]*?)[,\\s]+(\\d{1,5}[A-Za-z]?)\\s*$", "i"));
+    if (m2) return reg(impjPrefixoRua(m2[1]), m2[2], "rua+num");
+
+    var m3 = det.match(/^\s*(\d{1,5}[A-Za-z]?)\b/);
+    if (m3) return reg(impjPrefixoRua(ruaRaw), m3[1], "det-inicio");
+
+    var m4 = det.match(/(\d{1,5}[A-Za-z]?)\s*$/);
+    if (m4) return reg(impjPrefixoRua(ruaRaw), m4[1], "det-fim");
+
+    var m5 = det.match(new RegExp("^(" + IMPJ_TIPO + "[^,]*?)[,\\s]+(\\d{1,5}[A-Za-z]?)\\b", "i"));
+    if (m5) return reg(impjPrefixoRua(m5[1]), m5[2], "det-completo");
+
+    return reg(null, null, "falhou");
+  }
+
+  // Recebe o array "data" do JSON (um pacote por item) e devolve a lista
+  // pronta pro texto de "Organizar pacotes", junto com um resumo pra avisar
+  // o Sérgio do que aconteceu (pedidos com várias peças, marcados como
+  // "abnormal" pela própria J&T, e qualquer endereço que não deu pra ler).
+  function impjProcessarPacotes(dados) {
+    // pedidos com mais de uma peça repetem o mesmo pacote: um registro "base"
+    // (código de 15 dígitos) e um por peça física ("-001", "-002", ...). O
+    // base é sempre um espelho do grupo — descarta, ou o pacote conta em
+    // dobro na lista.
+    var porBase = {};
+    dados.forEach(function (p) {
+      var base = (p.waybillNo || "").split("-")[0];
+      (porBase[base] = porBase[base] || []).push(p);
+    });
+    var finais = [], removidosBase = 0;
+    Object.keys(porBase).forEach(function (base) {
+      var regs = porBase[base];
+      if (regs.length === 1) { finais.push(regs[0]); return; }
+      var comSufixo = regs.filter(function (r) { return (r.waybillNo || "").indexOf("-") !== -1; });
+      var semSufixo = regs.filter(function (r) { return (r.waybillNo || "").indexOf("-") === -1; });
+      finais = finais.concat(comSufixo.length ? comSufixo : regs);
+      removidosBase += comSufixo.length ? semSufixo.length : 0;
+    });
+
+    var registros = finais.map(function (p) {
+      var r = impjExtrairRegistro(p);
+      r.codigo = p.waybillNo;
+      r.abnormal = !!p.isAbnormal;
+      return r;
+    });
+
+    // núcleos de rua já resolvidos nesta mesma lista, usados como âncora pros
+    // poucos endereços que nenhuma das estratégias acima decifrou sozinha
+    var nucleos = [];
+    registros.forEach(function (r) {
+      if (!r.rua) return;
+      var nuc = r.rua.replace(new RegExp("^" + IMPJ_TIPO + "\\s+", "i"), "").trim();
+      if (nuc.length >= 6 && nucleos.indexOf(nuc) === -1) nucleos.push(nuc);
+    });
+    nucleos.sort(function (a, b) { return b.length - a.length; });
+    registros.forEach(function (r) {
+      if (r.rua && r.numero) return;
+      var alvo = normalizar(r.detRaw || "");
+      for (var i = 0; i < nucleos.length; i++) {
+        var nu = nucleos[i], nuS = normalizar(nu);
+        if (alvo.indexOf(nuS) !== 0) continue;
+        var resto = (r.detRaw || "").slice(nu.length).trim();
+        var m = resto.match(/^\s*(\d{1,5}[A-Za-z]?)/);
+        if (m) { r.rua = impjPrefixoRua(nu); r.numero = m[1]; r.metodo = "ancorado-nucleo"; }
+        break;
       }
     });
 
-    // dígito trocado: mesmo tamanho, uma posição diferente e MESMO nome.
-    // O nome é a trava — sem ele, dois pacotes de verdade poderiam ser
-    // fundidos num só, que é pior que o problema.
-    var restantes = Object.keys(brutos).filter(function (c) { return c.length === 15; });
-    var porPrefixo = {};
-    restantes.forEach(function (c) {
-      var p = c.slice(0, 8);
-      (porPrefixo[p] = porPrefixo[p] || []).push(c);
-    });
-    Object.keys(porPrefixo).forEach(function (p) {
-      var lista = porPrefixo[p];
-      for (var i = 0; i < lista.length; i++) {
-        for (var j = i + 1; j < lista.length; j++) {
-          var a = lista[i], b = lista[j];
-          if (!brutos[a] || !brutos[b]) continue;
-          var dif = 0;
-          for (var k = 0; k < 15; k++) if (a.charAt(k) !== b.charAt(k)) dif++;
-          if (dif !== 1) continue;
-          var na = (brutos[a].nome[0] || "").toLowerCase().replace(/\s+/g, "");
-          var nb = (brutos[b].nome[0] || "").toLowerCase().replace(/\s+/g, "");
-          if (na && nb && (na === nb || lensDist(na, nb) <= 2)) juntar(b, a);
-        }
-      }
-    });
-    return brutos;
-  }
-
-  function lensInterpretar(textos) {
-    var brutos = {};
-    textos.forEach(function (txt) {
-      var linhas = lensSemConf(txt).split("\n").map(function (l) { return l.replace(/\s+$/, ""); });
-      for (var i = 0; i < linhas.length; i++) {
-        var mc = linhas[i].match(LENS_COD);
-        if (!mc) continue;
-        var cod = mc[1];
-        if (!brutos[cod]) brutos[cod] = { nome: [], end: [], faixa: false, fim: "", ok: false, cru: "" };
-        var j = i + 1, nome = null;
-        while (j < linhas.length) {
-          var sl = linhas[j].trim();
-          if (LENS_COD.test(sl)) break;   // já começou outro cartão: este ficou sem nome
-          if (sl && !LENS_DATA.test(sl) && lensTiraRuido(sl).length > 2) { nome = lensTiraRuido(sl); break; }
-          j++;
-        }
-        var partes = [], k = nome ? j + 1 : i + 1, olh = 0;
-        while (k < linhas.length && olh < 12) {
-          var s2 = linhas[k].trim();
-          // A parada tem que ser testada ANTES de avançar o cursor. Avançando
-          // primeiro, a linha do próximo código ficava para trás e aquele
-          // pacote sumia da lista inteira — sem erro, sem aviso, sem nada.
-          // Acontece sempre que um cartão vem sem a linha de data.
-          if (LENS_DATA.test(s2) || LENS_COD.test(s2)) break;
-          k++; olh++;
-          if (!s2) continue;
-          var lim = lensTiraRuido(s2);
-          if (lim.replace(/[^\w]/g, "").length >= 3) partes.push(lim);
-          if (partes.length >= 4) break;
-        }
-        var cru = partes.join(" ");
-        var end = lensLimpar(cru);
-        if (nome) brutos[cod].nome.push(nome);
-        if (end) brutos[cod].end.push(end);
-        if (lensFaixa) {
-          brutos[cod].faixa = true;
-          if (lensFimFaixa) brutos[cod].fim = lensFimFaixa;
-          if (lensFaixaOk) brutos[cod].ok = true;
-          if (!brutos[cod].cru) brutos[cod].cru = cru.replace(/\s+/g, " ").trim();
-        }
-        i = Math.max(k, i + 1) - 1;
-      }
+    // encaixa cada rua na sua já cadastrada em Faixas (mesma correspondência
+    // usada pra corrigir nome de rua torto) — assim o nome final sai igual ao
+    // que o Sérgio já registrou, e o pacote ganha cor sem precisar de nada a
+    // mais dele
+    registros.forEach(function (r) {
+      if (!r.rua) return;
+      var oficial = encontrarRuaMapeada(r.rua, state.mapaRuas);
+      if (oficial) r.rua = oficial.nome;
+      r.numero = impjNormalizarNumero(r.numero);
     });
 
-    function votar(xs) {
-      if (!xs.length) return null;
-      var m = new Map();
-      xs.forEach(function (x) { m.set(x, (m.get(x) || 0) + 1); });
-      var melhor = null, n = -1;
-      m.forEach(function (v, k) { if (v > n) { n = v; melhor = k; } });
-      return melhor;
-    }
-
-    brutos = lensConsolidar(brutos);
-
-    var regs = [];
-    Object.keys(brutos).forEach(function (cod) {
-      var L = brutos[cod], ruas = [], nums = [];
-      L.end.forEach(function (e) {
-        lensVias(e).forEach(function (par) {
-          // É AQUI que a aba Faixas manda: se a rua lida bate com uma cadastrada,
-          // vale o nome que está lá. Sem isso cada leitura torta virava uma rua
-          // nova e o pacote caía na caixa cinza sem cor.
-          var oficial = encontrarRuaMapeada(par[0], state.mapaRuas);
-          ruas.push(oficial ? oficial.nome : par[0]);
-          nums.push(par[1]);
-        });
-      });
-      regs.push({
-        codigo: cod, nome: votar(L.nome), rua: votar(ruas),
-        numero: (L.faixa && L.fim) ? L.fim : votar(nums),
-        faixa: L.faixa, faixaOk: L.ok, cru: L.cru,
-        codigoTorto: cod.length !== 15
-      });
-    });
-    return regs;
-  }
-
-
-  function lensSalvar() {
-    salvar("lens-capturas", { capturas: state.lens.capturas, esperado: state.lens.esperado, rascunho: state.lens.rascunho });
-  }
-
-  function renderLens() {
-    var L = state.lens, html = "";
-    html += '<div style="display:flex;align-items:center;gap:10px;margin:4px 0 12px">' +
-      '<button data-action="lens-fechar" style="border:none;background:none;font-size:22px;color:var(--ink);opacity:.6;cursor:pointer;padding:0">✕</button>' +
-      '<strong style="font-size:16px">Colar do Google Lens</strong></div>';
-
-    html += '<div class="card" style="padding:12px;font-size:12px;line-height:1.5;margin-bottom:12px">' +
-      '<p style="margin:0 0 6px;font-weight:600">Como fazer:</p>' +
-      '<p style="margin:2px 0">1. No app da J&amp;T, captura de rolagem da lista</p>' +
-      '<p style="margin:2px 0">2. Google Fotos → Lens → Selecionar tudo → Copiar</p>' +
-      '<p style="margin:2px 0">3. Cola aqui e toca em Adicionar</p>' +
-      '<p style="margin:6px 0 0;color:var(--accent-deep);font-weight:600">Comece cada captura 2 ou 3 pacotes antes de onde a anterior parou — é essa repetição que prova que nenhum pacote caiu no vão.</p></div>';
-
-    html += '<textarea id="lensTexto" class="card" rows="5" placeholder="Cole aqui o texto de UMA captura" style="width:100%;font-size:13px;font-family:ui-monospace,monospace;padding:10px;margin-bottom:10px;color:var(--ink)">' + esc(L.rascunho || "") + '</textarea>';
-    html += '<button class="btn-primary" data-action="lens-add" style="margin-bottom:10px">Adicionar esta captura</button>';
-
-    if (L.capturas.length) {
-      var todos = {};
-      html += '<div style="margin-bottom:10px">';
-      L.capturas.forEach(function (t, i) {
-        var cods = lensCodigosDe(lensSemConf(t));
-        for (var k in cods) todos[k] = 1;
-        if (i > 0) {
-          var comum = lensEmComum(lensCodigosDe(lensSemConf(L.capturas[i - 1])), cods);
-          var cor = comum >= 2 ? "var(--ok)" : (comum === 1 ? "var(--accent-deep)" : "var(--alert)");
-          var txt = comum >= 2 ? comum + " pacotes repetidos — emenda confirmada"
-                  : comum === 1 ? "só 1 repetido — margem curta"
-                  : "NENHUM repetido — pode ter faltado pacote entre estas duas";
-          html += '<div style="font-size:11.5px;font-weight:600;color:' + cor + ';padding:3px 0 3px 10px">↕ ' + txt + '</div>';
-        }
-        html += '<div style="display:flex;justify-content:space-between;align-items:center;background:var(--paper-deep);border:1px solid var(--line);border-radius:7px;padding:7px 10px;font-size:12.5px;margin-bottom:2px">' +
-          '<span>Captura ' + (i + 1) + ' · <b>' + Object.keys(cods).length + '</b> pacote(s)</span>' +
-          '<button class="pill" data-action="lens-rm" data-i="' + i + '">remover</button></div>';
-      });
-      html += '</div>';
-      var n = Object.keys(todos).length;
-      var esp = parseInt(L.esperado, 10);
-      html += '<div class="card" style="padding:10px;margin-bottom:10px;font-size:13px;display:flex;justify-content:space-between;align-items:center">' +
-        '<span><b>' + n + '</b> pacotes somando tudo</span>' +
-        (esp ? '<span style="font-weight:700;color:' + (n >= esp ? "var(--ok)" : "var(--accent-deep)") + '">' +
-               (n >= esp ? "bate com " + esp : "faltam " + (esp - n)) + '</span>' : "") + '</div>';
-    }
-
-    html += '<div style="display:flex;gap:10px;align-items:flex-end;margin-bottom:12px">' +
-      '<div><span style="font-size:11px;opacity:.65">total na aba da J&amp;T</span><br>' +
-      '<input id="lensEsperado" type="number" min="0" value="' + esc(L.esperado || "") + '" placeholder="289" style="width:100px;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
-      '<button class="btn-primary" data-action="lens-montar" style="flex:1"' + (!L.capturas.length ? " disabled" : "") + '>Usar esta lista</button></div>';
-
-    if (L.capturas.length) {
-      // Sem o texto cru não dá pra investigar um pacote que sumiu: em imagem
-      // não se roda nada. Este botão salva exatamente o que foi colado.
-      html += '<button class="btn-primary" data-action="lens-baixar" style="background:transparent;border:1px solid var(--line);color:var(--ink);opacity:.7;margin-bottom:8px">\u{1F4BE} Baixar o texto colado (pra investigar erro)</button>';
-      html += '<button class="btn-primary" data-action="lens-limpar" style="background:transparent;border:1px solid var(--line);color:var(--ink);opacity:.7">Limpar as capturas</button>';
-    }
-    return html;
-  }
-
-  function lensMontar() {
-    var L = state.lens;
-    if (L.rascunho && L.rascunho.trim()) { lensAdicionar(); }
-    if (!L.capturas.length) return;
-    var regs = lensInterpretar(L.capturas);
-
-    // Trava de sanidade: todo código que existe no texto TEM que virar um
-    // registro. Um sumiço aqui não dá erro nem aparece na tela — foi assim que
-    // 21 pacotes de 289 evaporaram sem ninguém notar. Se acontecer de novo,
-    // que pelo menos apareça.
-    var codsTexto = {};
-    L.capturas.forEach(function (t) {
-      var c = lensCodigosDe(lensSemConf(t));
-      for (var k in c) codsTexto[k] = 1;
-    });
-    var noTexto = Object.keys(codsTexto).length;
-    var sumiram = [];
-    if (noTexto !== regs.length) {
-      var temRegistro = {};
-      regs.forEach(function (r) { temRegistro[r.codigo] = 1; });
-      sumiram = Object.keys(codsTexto).filter(function (c) { return !temRegistro[c]; });
-    }
-    var completos = regs.filter(function (r) { return r.rua && r.numero && r.nome; });
-    var faltando = regs.filter(function (r) { return !(r.rua && r.numero && r.nome); });
-    var conferir = completos.filter(function (r) { return r.faixa && !r.faixaOk; });
+    var completos = registros.filter(function (r) { return r.rua && r.numero; });
+    var falhas = registros.filter(function (r) { return !(r.rua && r.numero); });
 
     completos.sort(function (a, b) {
       return a.rua === b.rua ? (parseInt(a.numero, 10) - parseInt(b.numero, 10)) : a.rua.localeCompare(b.rua);
     });
     var texto = completos.map(function (r) {
-      return r.rua + ", " + r.numero + ", " + r.nome + ", " + r.codigo;
+      return r.rua + ", " + r.numero + ", " + (r.nome || "").replace(/\s+/g, " ").trim() + ", " + r.codigo;
     }).join("\n");
 
-    var avisos = [];
-    if (sumiram.length) avisos.push("ATENÇÃO: " + sumiram.length + " código(s) estão no texto colado mas não entraram na lista. Isso é falha do app, não sua — me mostre esta mensagem: " + sumiram.slice(0, 8).join(", ") + (sumiram.length > 8 ? " e mais " + (sumiram.length - 8) : ""));
-    if (faltando.length) avisos.push(faltando.length + " pacote(s) ficaram sem endereço completo (o texto cortou o cartão no meio): " + faltando.map(function (r) { return r.codigo; }).join(", "));
-    var tortos = completos.filter(function (r) { return r.codigoTorto; });
-    if (tortos.length) avisos.push(tortos.length + " pacote(s) com o código lido fora dos 15 dígitos — o pacote está na lista, mas o bipe não vai casar até você corrigir o código: " + tortos.map(function (r) { return r.codigo + " (" + r.nome + ")"; }).join(" · "));
-    if (conferir.length) avisos.push(conferir.length + " endereço(s) com faixa de numeração que o resto do endereço não confirmou — confira: " + conferir.map(function (r) { return r.rua + ", " + r.numero + " (" + r.nome + ")"; }).join(" · "));
-    var esp = parseInt(L.esperado, 10);
-    if (esp && completos.length < esp) avisos.push("A J&T mostra " + esp + " e saíram " + completos.length + ". Faltam " + (esp - completos.length) + " — dá pra voltar e colar mais capturas.");
+    var porBaseFinal = {};
+    completos.forEach(function (r) {
+      var b = r.codigo.split("-")[0];
+      (porBaseFinal[b] = porBaseFinal[b] || []).push(r);
+    });
+    var gruposMultiPeca = Object.keys(porBaseFinal).filter(function (b) { return porBaseFinal[b].length > 1; })
+      .map(function (b) { return porBaseFinal[b]; });
 
-    state.textoColado = texto;
-    state.lens.aberto = false;
-    render();
-    if (avisos.length) alert("Lista pronta com " + completos.length + " pacotes.\n\n" + avisos.join("\n\n"));
+    return {
+      texto: texto, total: completos.length, removidosBase: removidosBase,
+      falhas: falhas, gruposMultiPeca: gruposMultiPeca,
+      abnormais: completos.filter(function (r) { return r.abnormal; })
+    };
   }
 
-  function lensAdicionar() {
-    var t = state.lens.rascunho || "";
-    if (!t.trim()) return;
-    if (!Object.keys(lensCodigosDe(lensSemConf(t))).length) {
-      alert("Não achei nenhum código de 15 dígitos nesse texto. Confira se o Lens copiou mesmo a lista.");
-      return;
+  function impjSalvarRascunho() {
+    salvar("json-import-rascunho", state.jsonImport.rascunho);
+  }
+
+  function renderImportarJson() {
+    var J = state.jsonImport, html = "";
+    html += '<div style="display:flex;align-items:center;gap:10px;margin:4px 0 12px">' +
+      '<button data-action="json-fechar" style="border:none;background:none;font-size:22px;color:var(--ink);opacity:.6;cursor:pointer;padding:0">✕</button>' +
+      '<strong style="font-size:16px">Importar JSON da API</strong></div>';
+
+    html += '<div class="card" style="padding:12px;font-size:12px;line-height:1.5;margin-bottom:12px">' +
+      '<p style="margin:0 0 6px;font-weight:600">Cole aqui a resposta capturada no proxy:</p>' +
+      '<p style="margin:2px 0">O corpo (JSON) da chamada <code>awaitDelivery/all</code> — pode colar com ou sem o <code>{"code":1,...,"data":[...]}</code> em volta, tanto faz.</p>' +
+      '<p style="margin:6px 0 0;color:var(--accent-deep);font-weight:600">É o dado que o servidor da J&amp;T manda de verdade — sem leitura de tela, sem erro de OCR.</p></div>';
+
+    html += '<textarea id="jsonTexto" class="card" rows="8" placeholder="Cole aqui o JSON" style="width:100%;font-size:12px;font-family:ui-monospace,monospace;padding:10px;margin-bottom:10px;color:var(--ink)">' + esc(J.rascunho || "") + '</textarea>';
+    html += '<button class="btn-primary" data-action="json-gerar"' + (!J.rascunho || !J.rascunho.trim() ? " disabled" : "") + '>Gerar lista</button>';
+    return html;
+  }
+
+  function impjGerarLista() {
+    var bruto = (state.jsonImport.rascunho || "").trim();
+    if (!bruto) return;
+    var obj;
+    try { obj = JSON.parse(bruto); }
+    catch (e) { alert("Isso não é um JSON válido. Confira se copiou o corpo da resposta inteiro, sem cortar o começo nem o fim."); return; }
+    var dados = Array.isArray(obj) ? obj : (obj && Array.isArray(obj.data) ? obj.data : null);
+    if (!dados) { alert("Não achei uma lista de pacotes nesse JSON (esperava um array em \"data\")."); return; }
+    if (!dados.length) { alert("O JSON não tem nenhum pacote dentro."); return; }
+
+    var r = impjProcessarPacotes(dados);
+    if (!r.total) { alert("Nenhum pacote saiu com endereço completo. Confira se colou o JSON certo."); return; }
+
+    var avisos = [];
+    if (r.falhas.length) avisos.push(r.falhas.length + " pacote(s) não deu pra ler o endereço — ficaram de fora: " + r.falhas.map(function (f) { return f.codigo; }).join(", "));
+    if (r.gruposMultiPeca.length) {
+      avisos.push(r.gruposMultiPeca.length + " pedido(s) com mais de uma peça (código com sufixo -001, -002...): " +
+        r.gruposMultiPeca.map(function (g) { return g[0].nome + " (" + g.length + " peças, " + g[0].rua + " " + g[0].numero + ")"; }).join(" · "));
     }
-    state.lens.capturas.push(t);
-    state.lens.rascunho = "";
-    lensSalvar();
+    if (r.abnormais.length) avisos.push(r.abnormais.length + " pacote(s) vieram marcados como \"abnormal\" pela própria J&T — fica o alerta, nenhum foi tirado da lista.");
+    if (r.removidosBase) avisos.push("(" + r.removidosBase + " registro(s) duplicado(s) de pedidos com peças foram descartados sem afetar a contagem.)");
+
+    state.textoColado = r.texto;
+    state.jsonImport.aberto = false;
+    state.jsonImport.rascunho = "";
+    impjSalvarRascunho();
     render();
+    alert("Lista pronta com " + r.total + " pacotes." + (avisos.length ? "\n\n" + avisos.join("\n\n") : ""));
   }
 
   function renderSeparar() {
     var html = "";
-    if (state.lens.aberto) return renderLens();
+    if (state.jsonImport.aberto) return renderImportarJson();
     if (!state.linhasParseadas) {
       html += '<div class="card" style="padding:12px;font-size:12px;line-height:1.5;margin-bottom:12px">' +
         '<p style="font-weight:600;margin:0 0 4px">Cole 1 pacote por linha:</p>' +
@@ -3318,8 +3202,8 @@
         '<textarea id="textoColado" class="card" rows="10" placeholder="Rua Ator Paulo Gustavo, 72, Jo\u00e3o Silva, 888030883491111' + "\n" + 'Rua Mariz e Barros, 501, Anne Elise, 888030883495555" style="width:100%;font-size:14px;font-family:ui-monospace,monospace;padding:12px;margin-bottom:12px;color:var(--ink)">' + esc(state.textoColado) + "</textarea>" +
         '<button class="btn-primary" data-action="organizar"' + (!state.textoColado.trim() ? " disabled" : "") + ">Organizar pacotes</button>" +
         '<div style="display:flex;align-items:center;gap:9px;font-size:11px;opacity:.5;margin:14px 0"><span style="flex:1;height:1px;background:var(--line)"></span>ou<span style="flex:1;height:1px;background:var(--line)"></span></div>' +
-        '<button class="btn-primary" data-action="lens-abrir" style="background:var(--accent-deep)">\u{1F4CB} Colar do Google Lens</button>' +
-        '<p style="font-size:11px;opacity:.6;margin:7px 0 0;line-height:1.45">Pra quando a lista vem da captura de tela do app da J&T: eu separo rua, n\u00famero, nome e c\u00f3digo sozinho.</p>';
+        '<button class="btn-primary" data-action="json-abrir" style="background:var(--accent-deep)">\u{1F4E1} Importar JSON da API</button>' +
+        '<p style="font-size:11px;opacity:.6;margin:7px 0 0;line-height:1.45">Pra colar a resposta capturada direto da API do app da J&T (via proxy) \u2014 o dado real do servidor, sem leitura de tela.</p>';
       return html;
     }
 
@@ -3481,44 +3365,20 @@
     var limparSessaoBtn = app.querySelector('[data-action="limpar-sessao"]');
     if (limparSessaoBtn) limparSessaoBtn.onclick = limparSessao;
 
-    // ---- colar do Google Lens ----
-    var lensAbrir = app.querySelector('[data-action="lens-abrir"]');
-    if (lensAbrir) lensAbrir.onclick = function () { state.lens.aberto = true; render(); };
-    var lensFechar = app.querySelector('[data-action="lens-fechar"]');
-    if (lensFechar) lensFechar.onclick = function () { state.lens.aberto = false; render(); };
-    var lensTexto = document.getElementById("lensTexto");
-    if (lensTexto) lensTexto.oninput = function () { state.lens.rascunho = lensTexto.value; lensSalvar(); };
-    var lensEsperado = document.getElementById("lensEsperado");
-    if (lensEsperado) lensEsperado.oninput = function () { state.lens.esperado = lensEsperado.value; lensSalvar(); };
-    var lensAdd = app.querySelector('[data-action="lens-add"]');
-    if (lensAdd) lensAdd.onclick = lensAdicionar;
-    var lensMont = app.querySelector('[data-action="lens-montar"]');
-    if (lensMont) lensMont.onclick = lensMontar;
-    var lensLimp = app.querySelector('[data-action="lens-limpar"]');
-    if (lensLimp) lensLimp.onclick = function () {
-      if (!confirm("Apagar as capturas coladas?")) return;
-      state.lens.capturas = []; state.lens.rascunho = ""; lensSalvar(); render();
+    // ---- importar JSON da API ----
+    var jsonAbrir = app.querySelector('[data-action="json-abrir"]');
+    if (jsonAbrir) jsonAbrir.onclick = function () { state.jsonImport.aberto = true; render(); };
+    var jsonFechar = app.querySelector('[data-action="json-fechar"]');
+    if (jsonFechar) jsonFechar.onclick = function () { state.jsonImport.aberto = false; render(); };
+    var jsonTexto = document.getElementById("jsonTexto");
+    if (jsonTexto) jsonTexto.oninput = function () {
+      state.jsonImport.rascunho = jsonTexto.value;
+      impjSalvarRascunho();
+      var btn = app.querySelector('[data-action="json-gerar"]');
+      if (btn) btn.disabled = !state.jsonImport.rascunho.trim();
     };
-    var lensBaixar = app.querySelector('[data-action="lens-baixar"]');
-    if (lensBaixar) lensBaixar.onclick = function () {
-      var corpo = state.lens.capturas.map(function (t, i) {
-        return "===== CAPTURA " + (i + 1) + " =====\n" + t;
-      }).join("\n\n");
-      var cab = "total informado: " + (state.lens.esperado || "(nao informado)") +
-                "\ncapturas: " + state.lens.capturas.length +
-                "\nruas nas Faixas: " + state.mapaRuas.map(function (r) { return r.nome; }).join(" | ") + "\n\n";
-      var b = new Blob([cab + corpo], { type: "text/plain;charset=utf-8" });
-      var a = document.createElement("a");
-      a.href = URL.createObjectURL(b);
-      a.download = "capturas-" + dataDeHoje() + ".txt";
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    };
-    app.querySelectorAll('[data-action="lens-rm"]').forEach(function (el) {
-      el.onclick = function () {
-        state.lens.capturas.splice(parseInt(el.getAttribute("data-i"), 10), 1);
-        lensSalvar(); render();
-      };
-    });
+    var jsonGerar = app.querySelector('[data-action="json-gerar"]');
+    if (jsonGerar) jsonGerar.onclick = impjGerarLista;
 
     app.querySelectorAll('[data-action="toggle-separado"]').forEach(function (el) {
       el.onclick = function () {
