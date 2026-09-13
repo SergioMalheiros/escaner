@@ -1118,10 +1118,13 @@
   function faixasParaNuvem() {
     return state.mapaRuas.map(function (r) {
       var c = r.cores || coresPadrao();
-      return {
+      var o = {
         id: r.id, nome: r.nome, fragmentar: !!r.fragmentar,
         cores: { par1: c.par1, par2: c.par2, impar1: c.impar1, impar2: c.impar2 }
       };
+      if (r.maxPar) o.maxPar = r.maxPar;
+      if (r.maxImpar) o.maxImpar = r.maxImpar;
+      return o;
     });
   }
   function enviarFaixasParaNuvem() {
@@ -1259,6 +1262,19 @@
     rua.fragmentar = valor;
     salvarMapa();
     render();
+  }
+  // Até que número vai cada lado da rua, de verdade — não pra travar nada,
+  // só pra saber que "702" numa rua que só vai até uns 470 não é o número da
+  // casa: é o número do apartamento colado na frente, e o número de casa de
+  // verdade está sobrando em outro campo do endereço. Opcional: rua sem isso
+  // cadastrado passa pela ferramenta do jeito que sempre passou.
+  function definirMaxRua(ruaId, lado, valor) {
+    var rua = state.mapaRuas.find(function (r) { return r.id === ruaId; });
+    if (!rua) return;
+    var n = parseInt(valor, 10);
+    if (lado === "par") rua.maxPar = (valor && n > 0) ? n : undefined;
+    else rua.maxImpar = (valor && n > 0) ? n : undefined;
+    salvarMapa();
   }
   function definirCor(ruaId, campo, hex) {
     var rua = state.mapaRuas.find(function (r) { return r.id === ruaId; });
@@ -2931,17 +2947,34 @@
   // sem nenhuma leitura visual envolvida, então não erra dígito nem letra.
   var IMPJ_TIPO = "(?:rua|avenida|av\\.?|travessa|trav\\.?|estrada|alameda|al\\.?|pra[cç]a|largo|rodovia)";
   var IMPJ_JUNK = { "icarai": 1, "icaraí": 1, ".": 1, "": 1, "nao informado": 1, "não informado": 1 };
+  // "apto 902", "loja 106", "sala 105": um número colado a uma dessas
+  // palavras nunca é o número da casa — é complemento. Serve tanto pra tirar
+  // esse número da disputa por "qual é o número de verdade" quanto pra
+  // guardar o próprio complemento (a loja/apto) e mostrar pro entregador.
+  var IMPJ_COMPL = "(?:apt?o?|apart(?:amento)?|casa|cs|loja|lj|bloco|bl|sala|sl|andar|and|quadra|qd|lote|lt|fundos|sobrado)";
 
   function impjLimparRua(s) {
     if (!s) return "";
     s = s.replace(/-?\s*lado\s*[íi]mpar/gi, "");
     s = s.replace(/-?\s*lado\s*par/gi, "");
-    s = s.replace(/\s*-?\s*de\s*\d+\s*(?:a|ao)\s*\d+\s*(?:fim)?/gi, "");
+    s = s.replace(/\s*-?\s*de\s*\d+\s*(?:a|ao)\s*(?:\d+\s*(?:fim)?|fim)\b/gi, "");
+    s = s.replace(/\s*-?\s*at[ée]\s*\d+/gi, "");
     s = s.replace(/\s*-\s*trade\s*center.*$/gi, "");
     s = s.replace(/^\s*icara[ií];?\s*/gi, "");
     s = s.replace(/\(cpf.*?\)/gi, "");
     s = s.replace(/\s+/g, " ").trim();
     return s.replace(/^[\s;,.\-]+|[\s;,.\-]+$/g, "");
+  }
+  // Tira o mesmo ruído de faixa/lado que impjLimparRua tira do nome da rua,
+  // mas de um texto qualquer (o detalhe do endereço) — sem cortar fora do
+  // padrão "rua" nem exigir prefixo de tipo de logradouro.
+  function impjLimparRuido(s) {
+    if (!s) return "";
+    s = s.replace(/-?\s*lado\s*[íi]mpar/gi, " ");
+    s = s.replace(/-?\s*lado\s*par/gi, " ");
+    s = s.replace(/\s*-?\s*de\s*\d+\s*(?:a|ao)\s*(?:\d+\s*(?:fim)?|fim)\b/gi, " ");
+    s = s.replace(/\s*-?\s*at[ée]\s*\d+/gi, " ");
+    return s;
   }
   function impjRuaValida(s) {
     var s2 = impjLimparRua(s);
@@ -2970,6 +3003,76 @@
     var m = n.match(/^0*(\d+)([A-Za-z]?)$/);
     if (!m) return n;
     return (m[1] || "0") + m[2];
+  }
+
+  // Lista, em ordem, cada número de 1 a 5 dígitos de um texto, marcando se
+  // veio colado a uma palavra de complemento (apto/loja/sala/...) — esses
+  // nunca competem pra ser o número da casa.
+  function impjNumerosComContexto(s) {
+    var out = [], re = new RegExp("(\\b" + IMPJ_COMPL + "\\.?\\s*n?[º°]?\\s*)?(\\d{1,5})\\b", "gi"), m;
+    while ((m = re.exec(s || "")) !== null) out.push({ valor: m[2], comKeyword: !!m[1] });
+    return out;
+  }
+
+  // Uma rua às vezes vem com o número do apartamento colado na frente do
+  // número da casa (ex: streetNum = "701", mas o endereço de verdade é "413"
+  // — 701 é o apartamento). Sem saber até onde a rua vai, não dá pra saber
+  // qual dos dois é o de verdade. Com o "até que número" cadastrado em
+  // Faixas pro lado par/ímpar dessa rua, dá: se o número escolhido estourar
+  // esse teto, procura nos outros campos brutos um número que caiba — se
+  // achar exatamente um, é esse o número de casa de verdade.
+  function impjCorrigirPorFaixa(oficial, numeroAtual, textoLivre) {
+    if (!oficial || !numeroAtual) return null;
+    var n = parseInt(numeroAtual, 10);
+    if (isNaN(n)) return null;
+    var maxDele = (n % 2 === 0) ? oficial.maxPar : oficial.maxImpar;
+    if (!maxDele || n <= maxDele) return null;
+
+    var limpo = impjLimparRuido(textoLivre || "");
+    var vistos = {}, candidatos = [];
+    impjNumerosComContexto(limpo).forEach(function (c) {
+      if (c.comKeyword) return;
+      if (c.valor === numeroAtual) return;
+      if (!vistos[c.valor]) { vistos[c.valor] = 1; candidatos.push(c.valor); }
+    });
+    var validos = candidatos.filter(function (v) {
+      var nv = parseInt(v, 10);
+      var maxV = (nv % 2 === 0) ? oficial.maxPar : oficial.maxImpar;
+      return maxV && nv <= maxV;
+    });
+    if (validos.length === 1) return { numero: validos[0] };
+    return { numero: null };
+  }
+
+  // O que sobra do endereço depois de tirar o nome da rua e o número
+  // escolhido costuma ser exatamente o que ajuda o entregador a achar o
+  // pacote de verdade — loja, sala, apto, ou o nome do comércio ("Cafeteria",
+  // "Portaria"). Guarda esse resto pra mostrar entre parênteses na lista.
+  var IMPJ_COMPL_JUNK = { "undefined": 1, "null": 1, "n/a": 1, "na": 1, "nan": 1, "-": 1, "--": 1 };
+
+  function impjExtrairComplemento(r) {
+    var det = impjLimparRuido(r.detRaw || "");
+    var ruaLimpa = impjLimparRua(r.ruaRaw || "");
+    if (ruaLimpa) {
+      var alvo = normalizar(det);
+      var pos = alvo.indexOf(normalizar(ruaLimpa));
+      if (pos !== -1) det = det.slice(0, pos) + det.slice(pos + ruaLimpa.length);
+    }
+    if (r.numero) det = det.replace(new RegExp("\\b" + r.numero + "\\b", "g"), " ");
+    det = det.replace(/[;,]+/g, " · ");
+    det = det.replace(/^[\s·.\-]+|[\s·.\-]+$/g, "").replace(/\s+/g, " ").trim();
+    // sobrou só pontuação, um pedaço curto demais, ou lixo conhecido do
+    // próprio sistema da J&T (campo vazio virou a palavra "undefined")
+    var chave = det.replace(/[^\wÀ-ÿ]/g, "");
+    if (chave.length < 2 || IMPJ_COMPL_JUNK[det.toLowerCase()] || IMPJ_JUNK[normalizar(det)]) return "";
+    // sobrou só o nome da rua repetido (o texto bruto tinha o endereço
+    // duplicado) — isso não é complemento nenhum, é só ruído
+    var ruaSemTipo = (r.rua || "").replace(new RegExp("^" + IMPJ_TIPO + "\\s+", "i"), "");
+    if (normalizar(det) === normalizar(r.rua || "") || normalizar(det) === normalizar(ruaSemTipo)) return "";
+    // muito comprido costuma ser o endereço inteiro repetido por engano —
+    // melhor não mostrar nada do que mostrar lixo grande
+    if (det.length > 60) return "";
+    return det;
   }
 
   // Extrai rua+número de UM pacote do JSON, tentando várias estratégias na
@@ -3108,12 +3211,24 @@
     // encaixa cada rua na sua já cadastrada em Faixas (mesma correspondência
     // usada pra corrigir nome de rua torto) — assim o nome final sai igual ao
     // que o Sérgio já registrou, e o pacote ganha cor sem precisar de nada a
-    // mais dele
+    // mais dele. De quebra, com a rua oficial em mãos dá pra saber até que
+    // número esse lado dela vai (quando cadastrado) e corrigir um número que
+    // na verdade é complemento colado na frente.
     registros.forEach(function (r) {
       if (!r.rua) return;
       var oficial = encontrarRuaMapeada(r.rua, state.mapaRuas);
       if (oficial) r.rua = oficial.nome;
       r.numero = impjNormalizarNumero(r.numero);
+
+      var textoLivre = [r.ruaRaw, r.streetnumRaw, r.detRaw].filter(Boolean).join(" ");
+      if (oficial && r.numero) {
+        var corr = impjCorrigirPorFaixa(oficial, r.numero, textoLivre);
+        if (corr) {
+          if (corr.numero) { r.numero = corr.numero; r.metodo += "+corrigido-faixa"; }
+          else { r.foraDaFaixa = true; }
+        }
+      }
+      r.complemento = impjExtrairComplemento(r);
     });
 
     var completos = registros.filter(function (r) { return r.rua && r.numero; });
@@ -3123,7 +3238,12 @@
       return a.rua === b.rua ? (parseInt(a.numero, 10) - parseInt(b.numero, 10)) : a.rua.localeCompare(b.rua);
     });
     var texto = completos.map(function (r) {
-      return r.rua + ", " + r.numero + ", " + (r.nome || "").replace(/\s+/g, " ").trim() + ", " + r.codigo;
+      var nome = (r.nome || "").replace(/\s+/g, " ").trim();
+      var notas = [];
+      if (r.complemento) notas.push(r.complemento);
+      if (r.foraDaFaixa) notas.push("conferir número — fora da faixa cadastrada");
+      if (notas.length) nome += " (" + notas.join(" · ") + ")";
+      return r.rua + ", " + r.numero + ", " + nome + ", " + r.codigo;
     }).join("\n");
 
     var porBaseFinal = {};
@@ -3137,7 +3257,9 @@
     return {
       texto: texto, total: completos.length, removidosBase: removidosBase,
       falhas: falhas, gruposMultiPeca: gruposMultiPeca,
-      abnormais: completos.filter(function (r) { return r.abnormal; })
+      abnormais: completos.filter(function (r) { return r.abnormal; }),
+      corrigidosPorFaixa: completos.filter(function (r) { return r.metodo.indexOf("+corrigido-faixa") !== -1; }),
+      foraDaFaixa: completos.filter(function (r) { return r.foraDaFaixa; })
     };
   }
 
@@ -3181,6 +3303,14 @@
         r.gruposMultiPeca.map(function (g) { return g[0].nome + " (" + g.length + " peças, " + g[0].rua + " " + g[0].numero + ")"; }).join(" · "));
     }
     if (r.abnormais.length) avisos.push(r.abnormais.length + " pacote(s) vieram marcados como \"abnormal\" pela própria J&T — fica o alerta, nenhum foi tirado da lista.");
+    if (r.corrigidosPorFaixa.length) {
+      avisos.push(r.corrigidosPorFaixa.length + " número(s) vieram com complemento colado na frente e foram corrigidos com base na faixa cadastrada: " +
+        r.corrigidosPorFaixa.map(function (f) { return f.nome + " (" + f.rua + " " + f.numero + ")"; }).join(" · "));
+    }
+    if (r.foraDaFaixa.length) {
+      avisos.push("ATENÇÃO: " + r.foraDaFaixa.length + " pacote(s) com número fora da faixa cadastrada e sem um número alternativo claro no endereço — confira antes de sair: " +
+        r.foraDaFaixa.map(function (f) { return f.nome + " (" + f.rua + " " + f.numero + ", " + f.codigo + ")"; }).join(" · "));
+    }
     if (r.removidosBase) avisos.push("(" + r.removidosBase + " registro(s) duplicado(s) de pedidos com peças foram descartados sem afetar a contagem.)");
 
     state.textoColado = r.texto;
@@ -3312,6 +3442,16 @@
         html += '<p style="font-size:11px;margin:6px 0 0;opacity:.5">carregue a lista de hoje pra ver a contagem.</p>';
       }
       html += "</div>";
+
+      html += '<div style="padding:10px 12px;border-top:1px solid var(--line)">' +
+        '<p style="font-size:11px;font-weight:600;margin:0 0 2px;opacity:.65">ATÉ QUE NÚMERO VAI ESSA RUA (opcional)</p>' +
+        '<p style="font-size:11px;margin:0 0 8px;opacity:.55">Uma casa acima disso a ferramenta entende como complemento (apto/sala) colado na frente do número, e procura o número de verdade no resto do endereço.</p>' +
+        '<div style="display:flex;gap:10px">' +
+        '<div style="flex:1"><span style="font-size:11px;opacity:.65">lado par</span><br>' +
+        '<input type="number" min="0" data-max-rua="' + r.id + '" data-lado="par" value="' + (r.maxPar ? r.maxPar : "") + '" placeholder="ex: 470" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
+        '<div style="flex:1"><span style="font-size:11px;opacity:.65">lado ímpar</span><br>' +
+        '<input type="number" min="0" data-max-rua="' + r.id + '" data-lado="impar" value="' + (r.maxImpar ? r.maxImpar : "") + '" placeholder="ex: 471" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
+        "</div></div>";
 
       html += '<div style="padding:4px 12px 10px;border-top:1px solid var(--line)">' +
         '<p style="font-size:11px;font-weight:600;margin:8px 0 0;opacity:.65">CORES</p>';
@@ -3477,6 +3617,9 @@
     });
     app.querySelectorAll("[data-frag]").forEach(function (el) {
       el.onchange = function () { toggleFragmentar(el.getAttribute("data-frag"), el.checked); };
+    });
+    app.querySelectorAll("[data-max-rua]").forEach(function (el) {
+      el.onchange = function () { definirMaxRua(el.getAttribute("data-max-rua"), el.getAttribute("data-lado"), el.value); };
     });
     app.querySelectorAll('[data-action="abrir-paleta"]').forEach(function (el) {
       el.onclick = function () { toggleAbrirPaleta(el.getAttribute("data-chave")); };
