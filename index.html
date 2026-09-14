@@ -583,6 +583,37 @@
     if (streamLote) { streamLote.getTracks().forEach(function (t) { t.stop(); }); streamLote = null; }
   }
 
+  // O app roda "standalone" (instalado na tela inicial, sem barra do
+  // navegador — ver manifest.json), então o botão/gesto de voltar do
+  // celular não tem pra onde ir sem ajuda: sem histórico próprio pra
+  // consumir, o sistema entende que é pra SAIR do app inteiro — no meio de
+  // tirar foto isso já aconteceu de verdade (fechava a câmera e minimizava
+  // o app). O truque: ao abrir a câmera, empilha uma entrada extra no
+  // histórico; o primeiro "voltar" só desempilha ela, e a gente aproveita
+  // esse momento (popstate) pra fechar só a tela da câmera.
+  var historicoLotePush = false;
+  function empilharHistoricoLote() {
+    if (historicoLotePush) return;
+    try { history.pushState({ tela: "camera-lote" }, ""); historicoLotePush = true; } catch (e) { /* history indisponível: sem essa proteção, mas sem travar o app */ }
+  }
+  // Só usado quando a câmera fecha por um BOTÃO (✕ ou Enviar) — desfaz a
+  // entrada extra na hora, senão ela ficava órfã no histórico e o próximo
+  // "voltar" do usuário não fazia nada visível antes de funcionar de vez.
+  function desempilharHistoricoLote() {
+    if (!historicoLotePush) return;
+    historicoLotePush = false;
+    try { history.back(); } catch (e) {}
+  }
+  window.addEventListener("popstate", function () {
+    historicoLotePush = false;
+    if (!state.loteFoto) return;
+    // A entrada extra já foi consumida pelo "voltar" físico — se ainda tem
+    // foto sem enviar, pergunta antes de descartar (mesmo confirm do ✕); se
+    // desistir, recoloca a trava pro próximo "voltar" continuar funcionando.
+    cancelarLoteFoto();
+    if (state.loteFoto) empilharHistoricoLote();
+  });
+
   function abrirLoteFoto(ruaNome, numero) {
     if (!state.linhasParseadas) return;
     // Mesma regra que monta as caixas na tela (linhasDoEndereco): compara
@@ -626,6 +657,7 @@
 
   function iniciarCameraLote() {
     if (!state.loteFoto) return;
+    empilharHistoricoLote();
     // Libera qualquer câmera que tenha ficado presa de uma tentativa anterior
     // (inclusive a do scanner, se por algum motivo ainda estiver aberta) antes
     // de pedir uma nova — pedir uma câmera com outra ainda ativa é uma causa
@@ -751,6 +783,7 @@
     if (lote.tipo === "fachada") {
       pararCameraLote();
       state.loteFoto = null;
+      desempilharHistoricoLote();
       render();
       var chaveRotaFachada = sanitizarChaveFirebase(state.minhaRota);
       var chaveFachada = chaveOrdenavel(lote.ruaNome, lote.numero);
@@ -767,6 +800,7 @@
 
     pararCameraLote();
     state.loteFoto = null;
+    desempilharHistoricoLote();
     render();
 
     var chaveRota = sanitizarChaveFirebase(state.minhaRota);
@@ -856,6 +890,12 @@
   //   3. os pacotes daquele número já têm nomes DIFERENTES de quem recebeu
   //      (um campo só não conseguiria nem mostrar isso direito).
   function enderecoEhIndividual(chaveEndereco, itens) {
+    // Escolha explícita de "um nome pra todos" vale mais que qualquer
+    // auto-detecção abaixo — sem isso, um endereço com algum pacote já
+    // fotografado 2x (pacote + fachada da loja) ficava preso em
+    // loja-por-loja pra sempre, mesmo depois de apagar os nomes e tocar
+    // pra voltar (achouDuasFotos nunca deixava de ser true).
+    if (state.enderecosUnificados[chaveEndereco]) return false;
     if (state.enderecosIndividuais[chaveEndereco]) return true;
     var nomes = {};
     var achouDuasFotos = false;
@@ -867,12 +907,21 @@
     return achouDuasFotos || Object.keys(nomes).length > 1;
   }
   function alternarEnderecoIndividual(chaveEndereco, ruaNome, numero) {
-    if (state.enderecosIndividuais[chaveEndereco]) {
+    // Decide pelo estado que a TELA está mostrando (enderecoEhIndividual),
+    // não só pela flag manual — senão, quando o endereço tinha entrado em
+    // loja-por-loja sozinho (2 fotos num pacote, ou nomes já diferentes) e
+    // nunca por toque, o primeiro toque no botão não fazia nada visível.
+    var linhas = linhasDoEndereco(ruaNome, numero);
+    if (enderecoEhIndividual(chaveEndereco, linhas)) {
       delete state.enderecosIndividuais[chaveEndereco];
+      // Escolha explícita e definitiva de voltar pro campo único — sem essa
+      // flag, achouDuasFotos (dentro de enderecoEhIndividual) mantinha o
+      // endereço em loja-por-loja pra sempre assim que qualquer pacote dele
+      // já tivesse 2 fotos, mesmo depois de apagar os nomes aqui embaixo.
+      state.enderecosUnificados[chaveEndereco] = true;
       // Voltar pro modo "um nome pra todos" com nomes diferentes gravados
       // deixaria o endereço num estado que o campo único não representa —
       // então limpa os nomes e recomeça (o de cima passa a valer de novo).
-      var linhas = linhasDoEndereco(ruaNome, numero);
       var nomesDiferentes = {};
       linhas.forEach(function (l) {
         var q = (state.entregaInfo[l.id] && state.entregaInfo[l.id].quemRecebeu) || "";
@@ -890,6 +939,7 @@
         if (!confirmou) {
           // Desistiu: devolve o endereço pro modo loja por loja, que é onde
           // ele estava antes do toque.
+          delete state.enderecosUnificados[chaveEndereco];
           state.enderecosIndividuais[chaveEndereco] = true;
           render();
           return;
@@ -897,6 +947,7 @@
         aplicarQuemRecebeuEndereco(ruaNome, numero, "", true);
       }
     } else {
+      delete state.enderecosUnificados[chaveEndereco];
       state.enderecosIndividuais[chaveEndereco] = true;
     }
     salvarSessao();
@@ -1146,7 +1197,12 @@
     erroLeitor: "",
     // Endereços marcados como "loja por loja" (shopping): em vez de um nome
     // de quem recebeu pro número inteiro, cada pacote tem o seu.
-    enderecosIndividuais: {}
+    enderecosIndividuais: {},
+    // Endereços que o entregador escolheu explicitamente voltar pra "um nome
+    // pra todos" — vale mais que a auto-detecção de enderecoEhIndividual
+    // (ver comentário lá), senão um endereço com algum pacote de 2 fotos
+    // nunca conseguia sair do modo loja-por-loja de novo.
+    enderecosUnificados: {}
   };
 
   function carregar(chave, padrao) {
@@ -1279,7 +1335,7 @@
     // "dia" carimba de quando é essa sessão: sem ele, a lista de ontem
     // voltava na tela hoje de manhã como se fosse a de hoje, com o contador
     // de ontem junto.
-    var ok = salvar("sessao-atual", { dia: dataDeHoje(), texto: state.textoColado, linhas: state.linhasParseadas, pacoteStatus: state.pacoteStatus, enderecosIndividuais: state.enderecosIndividuais });
+    var ok = salvar("sessao-atual", { dia: dataDeHoje(), texto: state.textoColado, linhas: state.linhasParseadas, pacoteStatus: state.pacoteStatus, enderecosIndividuais: state.enderecosIndividuais, enderecosUnificados: state.enderecosUnificados });
     if (!ok) {
       // O progresso do dia é a coisa mais cara de perder: são horas de
       // separação e entrega que ninguém refaz de memória. Se não coube, abre
@@ -1290,7 +1346,7 @@
       var guardadasAntes = (carregar("fila-fotos-pendentes", []) || []).length;
       salvar("fila-fotos-pendentes", []);
       filaMaxGuardada = Math.max(0, Math.floor(guardadasAntes / 2));
-      ok = salvar("sessao-atual", { dia: dataDeHoje(), texto: state.textoColado, linhas: state.linhasParseadas, pacoteStatus: state.pacoteStatus, enderecosIndividuais: state.enderecosIndividuais });
+      ok = salvar("sessao-atual", { dia: dataDeHoje(), texto: state.textoColado, linhas: state.linhasParseadas, pacoteStatus: state.pacoteStatus, enderecosIndividuais: state.enderecosIndividuais, enderecosUnificados: state.enderecosUnificados });
       salvarFila();
     }
     if (!ok) {
@@ -1333,6 +1389,7 @@
     state.linhasParseadas = sess.linhas || null;
     state.pacoteStatus = sess.pacoteStatus || {};
     state.enderecosIndividuais = sess.enderecosIndividuais || {};
+    state.enderecosUnificados = sess.enderecosUnificados || {};
   }
 
   function adicionarRua() {
@@ -2878,7 +2935,10 @@
       };
     }
     var cancelarBtn = app.querySelector('[data-action="cancelar-lote"]');
-    if (cancelarBtn) cancelarBtn.onclick = cancelarLoteFoto;
+    if (cancelarBtn) cancelarBtn.onclick = function () {
+      cancelarLoteFoto();
+      if (!state.loteFoto) desempilharHistoricoLote();
+    };
     var reativarBtn = app.querySelector('[data-action="reativar-camera-lote"]');
     if (reativarBtn) reativarBtn.onclick = iniciarCameraLote;
     var tirarBtn = app.querySelector('[data-action="tirar-foto-lote"]');
