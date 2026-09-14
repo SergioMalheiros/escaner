@@ -69,7 +69,8 @@
     position: absolute; top: -5px; right: -5px; width: 17px; height: 17px; border-radius: 50%;
     background: var(--alert); color: #fff; border: none; font-size: 9px; line-height: 1; cursor: pointer;
   }
-  .item-lote-row { display: block; width: 100%; text-align: left; border: none; font-family: inherit; color: inherit; cursor: pointer; }
+  .contador-lote { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.55); color: #fff; font-weight: 700; font-size: 15px; padding: 6px 16px; border-radius: 999px; font-variant-numeric: tabular-nums; }
+  .contador-lote.completo { background: var(--ok); }
   .warn-box { border-radius: 10px; padding: 12px; font-size: 13px; background: var(--alert-light); color: var(--alert); }
   .colorpick-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; font-size: 13px; }
   .swatch { width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--line); padding: 0; cursor: pointer; }
@@ -532,7 +533,7 @@
     var linha = state.linhasParseadas.find(function (l) { return l.id === linhaId; });
     if (!linha || !linha.codigo) return;
     definirFoco("pacote-" + linhaId);
-    state.loteFoto = { tipo: "pacotes", modoExtra: true, ruaNome: linha.rua, numero: linha.numero, itens: [linha], fotos: [], atualIdx: 0, statusCamera: "pedindo", erro: "" };
+    state.loteFoto = { tipo: "pacotes", modoExtra: true, ruaNome: linha.rua, numero: linha.numero, itens: [linha], fotos: [], statusCamera: "pedindo", erro: "" };
     render();
     iniciarCameraLote();
   }
@@ -650,7 +651,7 @@
       return;
     }
     definirFoco("endereco-" + chaveOrdenavel(ruaNome, numero));
-    state.loteFoto = { tipo: "pacotes", ruaNome: ruaNome, numero: numero, itens: itens, fotos: [], atualIdx: 0, statusCamera: "pedindo", erro: "" };
+    state.loteFoto = { tipo: "pacotes", ruaNome: ruaNome, numero: numero, itens: itens, fotos: [], statusCamera: "pedindo", erro: "" };
     render();
     iniciarCameraLote();
   }
@@ -696,24 +697,12 @@
     });
   }
 
-  // Em endereço com loja (shopping), o NOME de cada pacote é a loja pra onde
-  // ele vai — é ele que diz em qual porta você tem que estar. Por isso a
-  // câmera passou a mostrar o nome em cada botão/miniatura (antes mostrava só
-  // "pacote 1, pacote 2", que não ajudava a saber de quem era).
-  function nomeItemLote(linha, idx) {
-    var n = linha && linha.nome ? String(linha.nome).trim() : "";
-    return n || "pacote " + (idx + 1);
-  }
   function cortarNome(n, max) {
-    return n.length > max ? n.slice(0, max - 1) + "\u2026" : n;
-  }
-  function fotosDoItemLote(lote, idx) {
-    return lote.fotos.filter(function (f) { return f.itemIdx === idx; }).length;
+    return n.length > max ? n.slice(0, max - 1) + "…" : n;
   }
   // Miniatura da câmera em lote: só a foto mesmo, sem nome nem legenda por
-  // baixo (antes cada uma dizia de quem era e se era "pacote" ou "loja") —
-  // pra quem já vê o nome no topo da tela, a legenda repetia informação à
-  // toa. Quem manda essa informação agora é a lista de conferência, embaixo.
+  // baixo. A câmera não identifica mais pacote por nome — quem recebeu cada
+  // um continua só na lista principal, fora da câmera.
   function miniaturaLote(f, idx) {
     return '<div class="miniatura-lote"><img src="' + f.previewUrl + '" />' +
       '<button data-action="remover-foto-lote" data-idx="' + idx + '">✕</button></div>';
@@ -738,12 +727,12 @@
       return;
     }
     var lote = state.loteFoto;
-    // Qual pacote recebe essa foto: o que estiver selecionado como "atual"
-    // (por padrão o primeiro; tocar num nome da lista de conferência troca
-    // pra ele — ver attachHandlersLote). Sem tipo de foto pra escolher antes:
-    // tira quantas quiser seguidas pro mesmo nome, pacote ou fachada da loja,
-    // tanto faz — todas contam pra ele até trocar de nome.
-    var itemIdx = lote.tipo === "fachada" ? 0 : (lote.atualIdx || 0);
+    // Qual pacote recebe essa foto: a próxima posição da lista que ainda
+    // não tem foto — sem escolher nome nem tela de conferência. Cada
+    // clique no obturador já conta pro próximo pacote sozinho. Passar do
+    // total (ou tirar mais de uma pra um endereço de 1 pacote só / foto
+    // extra) empilha tudo no último item, sem travar o obturador.
+    var itemIdx = lote.tipo === "fachada" ? 0 : Math.min(lote.fotos.length, lote.itens.length - 1);
     var maxLado = 1000;
     var w = video.videoWidth, h = video.videoHeight;
     if (w >= h && w > maxLado) { h = Math.round((h * maxLado) / w); w = maxLado; }
@@ -2789,56 +2778,26 @@
   function renderLoteFoto() {
     var lote = state.loteFoto;
     var ehFachada = lote.tipo === "fachada";
-    var chaveLote = ehFachada ? "" : chaveOrdenavel(lote.ruaNome, lote.numero);
-    var lojaPorLojaLote = !ehFachada && lote.itens.length > 1 && enderecoEhIndividual(chaveLote, lote.itens);
-    var quemRecebeuLote = "";
-    for (var qi = 0; qi < lote.itens.length; qi++) {
-      var qv = (state.entregaInfo[lote.itens[qi].id] && state.entregaInfo[lote.itens[qi].id].quemRecebeu) || "";
-      if (qv) { quemRecebeuLote = qv; break; }
-    }
-    var itensComFoto = ehFachada ? 0 : lote.itens.filter(function (_, idx) {
-      return lote.fotos.some(function (f) { return f.itemIdx === idx; });
-    }).length;
+    var totalItens = ehFachada ? 1 : lote.itens.length;
     // Modo "foto extra" (pacote que já tinha sido enviado antes, e alguém
     // esqueceu uma foto na hora): mostra quantas ele JÁ tinha salvas, pra não
     // parecer que a contagem voltou do zero.
     var jaTinhaExtra = (!ehFachada && lote.modoExtra) ? fotosDoPacote(lote.itens[0].id).length : 0;
-    var infoLinha = ehFachada
+    // A câmera não identifica mais pacote por nome — só o endereço e quantos
+    // pacotes tem ali. Quem recebeu cada um continua só na lista principal,
+    // fora da câmera (pedido: tirar todo nome de dentro da câmera).
+    var titulo = ehFachada ? "Frente da loja" : (lote.ruaNome + (lote.numero ? ", nº " + lote.numero : ""));
+    var subtitulo = ehFachada
       ? (lote.fotos.length > 0 ? "foto pronta pra enviar" : "tire 1 foto da fachada do prédio")
       : lote.modoExtra
-      ? ("já tem " + jaTinhaExtra + " " + plural(jaTinhaExtra, "foto salva", "fotos salvas") + " · essa é pra somar, não substitui")
-      : (itensComFoto + '/' + lote.itens.length + ' pacotes com foto · ' + lote.fotos.length + ' ' + plural(lote.fotos.length, "foto tirada", "fotos tiradas"));
-    // Nome de quem tá recebendo a foto agora, no lugar de destaque — igual
-    // cabeçalho de conversa. O endereço, que antes era o título, vira só
-    // contexto embaixo dele (ver pedido original: nada de nome escrito no
-    // clique da foto, e a identificação sobe pro topo da tela).
-    var atualIdx = ehFachada ? 0 : Math.min(lote.atualIdx || 0, lote.itens.length - 1);
-    var atualLinha = ehFachada ? null : lote.itens[atualIdx];
-    var temEscolha = !ehFachada && lote.itens.length > 1;
-    var nomeAtual = ehFachada ? "Frente da loja" : nomeItemLote(atualLinha, atualIdx);
+      ? ("foto extra · já tem " + jaTinhaExtra + " " + plural(jaTinhaExtra, "salva", "salvas"))
+      : (totalItens + " " + plural(totalItens, "pacote", "pacotes"));
+
     var html = '<div style="padding:24px 0">';
     html += '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px;gap:8px">' +
-      '<div><p style="font-weight:700;font-size:16px;margin:0">' + esc(nomeAtual) + '</p>' +
-      '<p style="font-size:12px;opacity:.65;margin:3px 0 0">' + esc(lote.ruaNome) + ' · nº ' + esc(lote.numero) +
-      (temEscolha ? ' · ' + (atualIdx + 1) + ' de ' + lote.itens.length : '') + '</p>' +
-      '<p style="font-size:12px;opacity:.65;margin:2px 0 0">' + infoLinha + '</p></div>' +
+      '<div><p style="font-weight:700;font-size:16px;margin:0">' + esc(titulo) + '</p>' +
+      '<p style="font-size:12px;opacity:.65;margin:3px 0 0">' + esc(subtitulo) + '</p></div>' +
       '<button data-action="cancelar-lote" style="border:none;background:none;font-size:22px;color:var(--ink);opacity:.6;cursor:pointer;flex-shrink:0">✕</button></div>';
-
-    if (!ehFachada && lote.itens.length > 1) {
-      // Dá pra virar a chave aqui dentro também: normalmente é na hora de
-      // fotografar que se percebe que aquele número é shopping.
-      html += '<button data-action="alternar-individual-lote" data-chave="' + chaveLote + '" class="pill' + (lojaPorLojaLote ? " ativo-entregue" : "") + '" style="margin-bottom:10px">' +
-        (lojaPorLojaLote ? "\ud83c\udfea Loja por loja" : "\ud83c\udfe2 Um nome pra todos") + "</button>";
-    }
-    if (!ehFachada && !lojaPorLojaLote) {
-      // Prédio: um nome só (o porteiro) vale pro número inteiro — ninguém
-      // confere nome por nome na portaria. Fachada não pergunta isso.
-      // data-action/data-rua/data-numero não são decoração: é por eles que o
-      // callback do Firebase reconhece que ESTE campo está sendo digitado e
-      // não pode ser trocado pelo valor que veio da nuvem (ver
-      // callbackEntregasAtual). Sem isso o nome sumia no meio da digitação.
-      html += '<input id="quemRecebeuLoteInput" data-action="quem-recebeu-lote" data-rua="' + esc(lote.ruaNome) + '" data-numero="' + esc(lote.numero) + '" value="' + esc(quemRecebeuLote) + '" placeholder="Quem recebeu esse lote? (ex: porteiro)" style="width:100%;font-size:13px;padding:8px 10px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light);margin-bottom:12px;box-sizing:border-box" />';
-    }
 
     if (lote.statusCamera === "pedindo") {
       html += '<p class="muted" style="text-align:center;padding:16px 0">pedindo acesso à câmera...</p>';
@@ -2851,13 +2810,15 @@
     }
 
     if (lote.statusCamera === "ativa") {
-      // Visor único, quase em tela cheia — igual abrir a câmera pra mandar
-      // foto numa conversa: um obturador redondo, sem nome nem tipo
-      // escrito, miniaturas por cima da imagem (sem legenda). Tira quantas
-      // fotos quiser seguidas pro nome atual — pacote, fachada da loja, o
-      // que for — até trocar de nome na lista de conferência mais abaixo.
+      // Visor único, quase em tela cheia — sem nome, sem lista de conferência.
+      // Só um contador (quando há mais de 1 pacote) e o obturador: tira e já
+      // conta sozinho pro próximo, sem precisar escolher nada (ver
+      // tirarFotoLote — o índice avança pela quantidade de fotos já tiradas).
       var podeTirarMais = !ehFachada || lote.fotos.length === 0;
       html += '<div class="visor-lote"><video id="videoLote" playsinline autoplay muted></video><div class="visor-lote-sombra"></div>';
+      if (!ehFachada && !lote.modoExtra && totalItens > 1) {
+        html += '<div class="contador-lote' + (lote.fotos.length >= totalItens ? " completo" : "") + '">' + lote.fotos.length + ' de ' + totalItens + '</div>';
+      }
       if (lote.fotos.length > 0) {
         html += '<div style="position:absolute;left:0;right:0;bottom:' + (podeTirarMais ? "88px" : "14px") + ';display:flex;gap:8px;overflow-x:auto;padding:0 14px">';
         lote.fotos.forEach(function (f, idx) { html += miniaturaLote(f, idx); });
@@ -2879,32 +2840,6 @@
       html += '</div>';
     }
 
-    // Conferência rápida por NOME: quem desse número já está com foto e
-    // quantas. Num shopping é isso que diz "a loja do Bruno já tá com as 2".
-    if (!ehFachada && lote.itens.length > 1) {
-      // Cada linha é clicável: tocar nela troca quem recebe a próxima foto
-      // (state.loteFoto.atualIdx) — é a "troca manual" que substitui os
-      // antigos botões de pacote/loja. 📸 marca quem está selecionado agora;
-      // 📷 + número é quantas fotos esse nome já tem.
-      html += '<div style="margin-top:14px;border-top:1px solid var(--line);padding-top:10px">';
-      lote.itens.forEach(function (linha, idx) {
-        var n = fotosDoItemLote(lote, idx);
-        var ativo = idx === atualIdx;
-        html += '<div style="padding:' + (lojaPorLojaLote ? "4px 0 10px" : "2px 0") + '">' +
-          '<button type="button" class="item-lote-row" data-action="selecionar-item-lote" data-idx="' + idx + '" style="display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:12px;padding:6px;border-radius:7px;opacity:' + (n || ativo ? "1" : ".55") + ';background:' + (ativo ? "var(--paper-deep)" : "transparent") + '">' +
-          '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:' + (ativo ? "700" : "400") + '">' + (ativo ? "📸 " : "") + (idx + 1) + '. ' + esc(nomeItemLote(linha, idx)) + '</span>' +
-          '<span style="flex-shrink:0;font-weight:700;color:' + (n >= 2 ? "var(--ok)" : "var(--ink)") + '">' + (n ? "📷 " + n : "sem foto") + '</span></button>' +
-          // Num shopping, quem assina é a pessoa daquela loja: o campo fica
-          // junto do nome dela, aqui mesmo na câmera, pra preencher na hora
-          // da entrega sem ter que voltar pra lista.
-          (lojaPorLojaLote
-            ? '<input data-action="quem-recebeu-lote-item" data-id="' + linha.id + '" value="' + esc((state.entregaInfo[linha.id] && state.entregaInfo[linha.id].quemRecebeu) || "") + '" placeholder="Quem recebeu nessa loja" style="width:100%;box-sizing:border-box;margin-top:5px;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light)" />'
-            : "") +
-          '</div>';
-      });
-      html += '</div>';
-    }
-
     html += '<button data-action="enviar-lote" class="btn-primary" style="margin-top:8px"' + (lote.fotos.length === 0 ? " disabled" : "") + '>' +
       '✅ ' + (ehFachada ? "Enviar foto da fachada" : "Enviar " + lote.fotos.length + " " + plural(lote.fotos.length, "foto", "fotos")) + '</button>';
     html += '</div>';
@@ -2913,27 +2848,6 @@
 
   function attachHandlersLote() {
     var app = document.getElementById("app");
-    var quemRecebeuLoteInput = document.getElementById("quemRecebeuLoteInput");
-    if (quemRecebeuLoteInput && state.loteFoto) {
-      var loteRuaNome = state.loteFoto.ruaNome, loteNumero = state.loteFoto.numero;
-      quemRecebeuLoteInput.oninput = function () { aplicarQuemRecebeuEndereco(loteRuaNome, loteNumero, quemRecebeuLoteInput.value, false); };
-      quemRecebeuLoteInput.onblur = function () { aplicarQuemRecebeuEndereco(loteRuaNome, loteNumero, quemRecebeuLoteInput.value, true); };
-    }
-    app.querySelectorAll('[data-action="quem-recebeu-lote-item"]').forEach(function (el) {
-      var id = el.getAttribute("data-id");
-      el.oninput = function () {
-        if (!state.entregaInfo[id]) state.entregaInfo[id] = {};
-        state.entregaInfo[id].quemRecebeu = el.value;
-      };
-      el.onblur = function () { salvarQuemRecebeu(id, el.value); };
-    });
-    var alternarLoteBtn = app.querySelector('[data-action="alternar-individual-lote"]');
-    if (alternarLoteBtn && state.loteFoto) {
-      var loteRua = state.loteFoto.ruaNome, loteNum = state.loteFoto.numero;
-      alternarLoteBtn.onclick = function () {
-        alternarEnderecoIndividual(alternarLoteBtn.getAttribute("data-chave"), loteRua, loteNum);
-      };
-    }
     var cancelarBtn = app.querySelector('[data-action="cancelar-lote"]');
     if (cancelarBtn) cancelarBtn.onclick = function () {
       cancelarLoteFoto();
@@ -2943,14 +2857,6 @@
     if (reativarBtn) reativarBtn.onclick = iniciarCameraLote;
     var tirarBtn = app.querySelector('[data-action="tirar-foto-lote"]');
     if (tirarBtn) tirarBtn.onclick = function () { tirarFotoLote(); };
-    app.querySelectorAll('[data-action="selecionar-item-lote"]').forEach(function (el) {
-      var idx = parseInt(el.getAttribute("data-idx"), 10);
-      el.onclick = function () {
-        if (!state.loteFoto) return;
-        state.loteFoto.atualIdx = idx;
-        render();
-      };
-    });
     var enviarBtn = app.querySelector('[data-action="enviar-lote"]');
     if (enviarBtn) enviarBtn.onclick = enviarLoteFoto;
     app.querySelectorAll('[data-action="remover-foto-lote"]').forEach(function (el) {
