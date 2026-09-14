@@ -3430,7 +3430,13 @@
     state.jsonImport.aberto = false;
     state.jsonImport.rascunho = "";
     impjSalvarRascunho();
-    render();
+    // Já organiza e envia pra nuvem sozinho, igual ao botão "Organizar
+    // pacotes" faria. Antes, essa etapa dependia de um clique separado
+    // (embaixo do texto gerado) que ninguém tinha motivo de imaginar
+    // necessário depois de um alerta dizendo "Lista pronta" — resultado: a
+    // lista ficava só neste aparelho, sem subir pra nuvem, e por isso não
+    // aparecia nos colegas que entravam com o mesmo código depois.
+    organizarPacotes();
     alert("Lista pronta com " + r.total + " pacotes." + (avisos.length ? "\n\n" + avisos.join("\n\n") : ""));
   }
 
