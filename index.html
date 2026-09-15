@@ -1108,7 +1108,18 @@
   // opcional", e comparar dois códigos é comparar a BASE deles: a etiqueta
   // física às vezes traz o rastreio com o sufixo, às vezes só a base, e as
   // duas formas têm que encontrar o pacote na lista.
-  var FORMATO_CODIGO = /^\d{15}(-\d{1,3})?$/;
+  //
+  // Nem toda encomenda usa esse formato numérico puro da J&T: encomenda que
+  // veio de parceiro/interline (Correios e bastante outro parceiro) costuma
+  // trazer o rastreio internacional padrão (norma S10 da UPU): 2 letras + 9
+  // dígitos + 2 letras, tipo "LB123456785BR" — sempre com letra no início.
+  // Antes esses códigos nem eram reconhecidos como código: bipar não fazia
+  // nada, sem aviso nenhum, porque caíam no mesmo "return" silencioso usado
+  // de propósito pra ignorar a chave de 44 dígitos da nota fiscal. Agora os
+  // dois formatos passam. (Não achei nenhum código assim na lista de hoje pra
+  // conferir a forma exata — se ainda não bipar, manda o código certinho que
+  // eu ajusto o formato.)
+  var FORMATO_CODIGO = /^(?:\d{15}(?:-\d{1,3})?|[A-Za-z]{1,2}\d{9,15}[A-Za-z]{0,2})$/;
   function codigoBase(c) { return String(c == null ? "" : c).replace(/-\d{1,3}$/, ""); }
 
   function parseLinhas(texto) {
@@ -3265,6 +3276,27 @@
     var m5 = det.match(new RegExp("^(" + IMPJ_TIPO + "[^,]*?)[,\\s]+(\\d{1,5}[A-Za-z]?)\\b", "i"));
     if (m5) return reg(impjPrefixoRua(m5[1]), m5[2], "det-completo");
 
+    // Número separado por VÍRGULA dentro do próprio campo de rua (em vez de
+    // ";" como no formato "pv" mais acima): "Rua X, 434, Apto 202, Bairro".
+    // Só entra aqui depois de tudo acima já ter falhado, e só quando o
+    // primeiro pedaço já tem cara de rua de verdade (começa com o tipo) —
+    // pra não arriscar pegar um número de um campo que não é isso.
+    if (ruaRaw.indexOf(",") !== -1) {
+      var pedacos = ruaRaw.split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+      if (pedacos.length >= 2 && new RegExp("^" + IMPJ_TIPO + "\\b", "i").test(pedacos[0]) && impjRuaValida(pedacos[0])) {
+        var numCand = impjNumeroValido(pedacos[1]);
+        if (numCand) return reg(impjPrefixoRua(pedacos[0]), numCand, "rua-com-virgula");
+      }
+    }
+
+    // Rua reconhecida mas nenhum número em lugar nenhum (comum em ponto
+    // comercial: "s/n, loja 236", só a referência do comércio na frente) —
+    // antes o pacote inteiro era descartado aqui, sem aviso, sem chance de
+    // bipar. Devolve a rua mesmo sem número; é impjProcessarPacotes que
+    // decide manter esse pacote na lista com "S/N" (mesma caixa cinza "SEM
+    // Nº" que endereço sem número já usa em calcularResultado).
+    if (impjRuaValida(ruaRaw)) return reg(impjPrefixoRua(ruaRaw), null, "sem-numero-no-campo");
+
     return reg(null, null, "falhou");
   }
 
@@ -3342,17 +3374,26 @@
         }
       }
       r.complemento = impjExtrairComplemento(r);
+      // Rua reconhecida mas nenhum número em canto nenhum (ver "sem-numero-
+      // no-campo" em impjExtrairRegistro) — antes isso derrubava o pacote da
+      // lista inteira. Agora entra com "S/N": calcularResultado já sabe pôr
+      // isso na caixa cinza "SEM Nº" da rua certa (é o mesmo caminho de
+      // qualquer endereço brasileiro sem número, S/N de verdade também cai
+      // lá), então dá pra bipar e separar mesmo sem o número — o que sobrou
+      // do endereço (loja, referência do comércio) fica visível no nome.
+      if (r.rua && !r.numero) { r.numero = "S/N"; r.semNumero = true; }
     });
 
     var completos = registros.filter(function (r) { return r.rua && r.numero; });
     var falhas = registros.filter(function (r) { return !(r.rua && r.numero); });
 
     completos.sort(function (a, b) {
-      return a.rua === b.rua ? (parseInt(a.numero, 10) - parseInt(b.numero, 10)) : a.rua.localeCompare(b.rua);
+      return a.rua === b.rua ? ordenarNumerico(a.numero, b.numero) : a.rua.localeCompare(b.rua);
     });
     var texto = completos.map(function (r) {
       var nome = (r.nome || "").replace(/\s+/g, " ").trim();
       var notas = [];
+      if (r.semNumero) notas.push("SEM NÚMERO — usar a loja/referência ao lado");
       if (r.complemento) notas.push(r.complemento);
       if (r.foraDaFaixa) notas.push("conferir número — fora da faixa cadastrada");
       if (notas.length) nome += " (" + notas.join(" · ") + ")";
@@ -3371,6 +3412,7 @@
       texto: texto, total: completos.length, removidosBase: removidosBase,
       falhas: falhas, gruposMultiPeca: gruposMultiPeca,
       abnormais: completos.filter(function (r) { return r.abnormal; }),
+      semNumero: completos.filter(function (r) { return r.semNumero; }),
       corrigidosPorFaixa: completos.filter(function (r) { return r.metodo.indexOf("+corrigido-faixa") !== -1; }),
       foraDaFaixa: completos.filter(function (r) { return r.foraDaFaixa; })
     };
@@ -3416,6 +3458,10 @@
         r.gruposMultiPeca.map(function (g) { return g[0].nome + " (" + g.length + " peças, " + g[0].rua + " " + g[0].numero + ")"; }).join(" · "));
     }
     if (r.abnormais.length) avisos.push(r.abnormais.length + " pacote(s) vieram marcados como \"abnormal\" pela própria J&T — fica o alerta, nenhum foi tirado da lista.");
+    if (r.semNumero.length) {
+      avisos.push(r.semNumero.length + " pacote(s) sem número identificado — entraram na lista mesmo assim, na caixa \"SEM Nº\" da rua certa: " +
+        r.semNumero.map(function (f) { return f.nome + " (" + f.rua + ")"; }).join(" · "));
+    }
     if (r.corrigidosPorFaixa.length) {
       avisos.push(r.corrigidosPorFaixa.length + " número(s) vieram com complemento colado na frente e foram corrigidos com base na faixa cadastrada: " +
         r.corrigidosPorFaixa.map(function (f) { return f.nome + " (" + f.rua + " " + f.numero + ")"; }).join(" · "));
