@@ -2020,11 +2020,29 @@
     }
   }
 
+  function textoContador() {
+    return formatarNumero(state.contadorGlobal || 0) + " · " +
+      (state.rotaConectada ? "Todos os pacotes processados no galpão" : "Pacotes processados neste aparelho");
+  }
+  // O contador do topo é a informação que MAIS muda no app inteiro: ele sobe a
+  // cada pacote separado por qualquer pessoa usando a ferramenta, em qualquer
+  // rota. Como todo aparelho escuta esse número, antes cada bipe de qualquer
+  // colega, em qualquer lugar, remontava a lista inteira de ~400 pacotes em
+  // TODOS os celulares — com o app travando justamente na hora de bipar
+  // rápido, que é quando o número mais sobe.
+  // Só o texto muda, então só o texto é trocado. Se a linha ainda não existe na
+  // tela (primeira carga), aí sim pede uma renderização normal.
+  function atualizarContadorNaTela() {
+    var el = document.getElementById("contadorGlobalTexto");
+    if (el) el.textContent = textoContador();
+    else render();
+  }
+
   function ouvirContadores() {
     if (!fbDb) return;
     fbDb.ref("contador_global").on("value", function (snap) {
       var v = snap.val();
-      if (typeof v === "number") { state.contadorGlobal = v; render(); }
+      if (typeof v === "number") { state.contadorGlobal = v; atualizarContadorNaTela(); }
     });
     // Antes isto lia o nó "rotas_registradas" INTEIRO só pra contar quantas
     // rotas existem — o que fazia todo aparelho baixar a lista completa de
@@ -2036,7 +2054,11 @@
     fbDb.ref("rotas_total").on("value", function (snap) {
       var v = snap.val();
       state.totalRotas = typeof v === "number" ? v : 0;
-      render();
+      // Esse número só aparece na aba Faixas. Refazer a tela por causa dele
+      // enquanto a pessoa está bipando na aba Câmera seria trabalho jogado
+      // fora — quando ela entrar em Faixas, a tela é montada com o valor já
+      // atualizado de qualquer jeito.
+      if (state.aba === "mapa") render();
     });
   }
   function statusDe(id) {
@@ -2790,7 +2812,40 @@
     try { alvo.setSelectionRange(focoSalvo.inicio, focoSalvo.fim); } catch (e) { /* input que não aceita seleção */ }
   }
 
+  // Refazer a tela custa caro: são ~400 pacotes virando HTML de novo, mais o
+  // reatar de todos os botões. E render() é chamado de muito lugar — cada
+  // aviso do Firebase, cada marcação, cada foto. Quando várias coisas mudam no
+  // mesmo instante (que é o normal: o colega separa 3 pacotes seguidos), isso
+  // virava 3 remontagens completas em milissegundos, todas jogadas fora menos
+  // a última.
+  //
+  // Agora render() só ANOTA que a tela precisa ser refeita, e o navegador
+  // refaz uma vez só no próximo quadro. Quem chama continua chamando igual.
+  // De quebra, com o app em segundo plano o navegador não dá quadro nenhum —
+  // então ele para de gastar bateria remontando tela que ninguém está vendo, e
+  // desenha uma vez só quando voltar.
+  var renderAgendado = false;
   function render() {
+    if (renderAgendado) return;
+    renderAgendado = true;
+    var jaRodou = false;
+    function executar() {
+      if (jaRodou) return;
+      jaRodou = true;
+      renderAgendado = false;
+      renderAgora();
+    }
+    // Os dois de propósito, e quem chegar primeiro manda (o outro vira nada).
+    // O requestAnimationFrame desenha na hora certa, junto do próximo quadro —
+    // mas ele NÃO roda quando não existe quadro nenhum, que é exatamente o caso
+    // do app em segundo plano. Sozinho, ele deixaria a tela pendurada sem ser
+    // desenhada. O setTimeout é a rede de segurança: mesmo sem quadro, a tela
+    // sai. No caminho normal o quadro vem antes e o tempo não faz nada.
+    requestAnimationFrame(executar);
+    setTimeout(executar, 32);
+  }
+
+  function renderAgora() {
     var app = document.getElementById("app");
 
     if (state.loteFoto) {
@@ -2813,11 +2868,8 @@
 
     var html = "";
 
-    var contadorAtivo = !!state.rotaConectada;
     html += '<header><div class="titlerow"><span style="font-size:22px">\u{1F4E6}</span><h1>Simplificando as Entregas</h1></div>' +
-      '<p style="font-size:12px;opacity:.6;margin:2px 0 0">' + formatarNumero(state.contadorGlobal || 0) + " \u00b7 " +
-      (contadorAtivo ? "Todos os pacotes processados no galp\u00e3o" : "Pacotes processados neste aparelho") +
-      "</p>" +
+      '<p id="contadorGlobalTexto" style="font-size:12px;opacity:.6;margin:2px 0 0">' + esc(textoContador()) + "</p>" +
       // Sem sinal: dizer isso no topo, onde a pessoa olha, em vez de deixar
       // ela achar que o colega est\u00e1 vendo o trabalho dela.
       (state.rotaConectada && state.conexaoViva === false
