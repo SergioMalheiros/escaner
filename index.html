@@ -1066,24 +1066,64 @@
     if (m && TIPOS_RUA[m[1]]) return { tipo: TIPOS_RUA[m[1]], nucleo: m[2].trim() };
     return { tipo: null, nucleo: t };
   }
+  // "Rua Par" NÃO pode casar dentro de "Rua Paraíso". Antes a comparação era
+  // indexOf puro com o mínimo de 3 letras, então um nome curto cadastrado
+  // casava no meio do nome de outra rua — e o pacote ia pra caixa colorida de
+  // uma rua que não é a dele. Num sistema onde separar é por cor, isso é o
+  // erro mais caro que existe, porque não tem como perceber: a cor aparece
+  // certinha, só que é a errada.
+  // Aqui o pedaço só vale se fechar em palavra inteira dos dois lados. Borda é
+  // qualquer coisa que não seja letra ou número, e não só espaço — senão
+  // "Rua Mariz e Barros" deixaria de casar com "Rua Mariz e Barros, Icaraí"
+  // por causa da vírgula.
+  function ehBorda(ch) { return ch === "" || !/[a-z0-9]/.test(ch); }
+  function contemPalavrasInteiras(texto, alvo) {
+    if (!alvo || alvo.length < 3) return false;
+    var i = texto.indexOf(alvo);
+    while (i !== -1) {
+      if (ehBorda(texto.charAt(i - 1)) && ehBorda(texto.charAt(i + alvo.length))) return true;
+      i = texto.indexOf(alvo, i + 1);
+    }
+    return false;
+  }
+  // Só vale quando UMA rua cadastrada encaixa. Com duas encaixando eu estaria
+  // escolhendo entre ruas de verdade, e mandar o pacote pra rua errada é pior
+  // que deixar ele na caixa cinza — que pelo menos aparece na tela e dá pra
+  // resolver na mão. Essa regra já existia na última tentativa lá embaixo; o
+  // problema era não valer pras de cima, que usavam find() e ficavam com a
+  // primeira que aparecesse.
+  function soSeUnica(lista) { return lista.length === 1 ? lista[0] : null; }
+
   function encontrarRuaMapeada(ruaTexto, mapa) {
     var norm = normalizar(ruaTexto);
-    var m = mapa.find(function (r) { return normalizar(r.nome) === norm; });
-    if (m) return m;
-    m = mapa.find(function (r) { return normalizar(r.nome).length > 2 && norm.indexOf(normalizar(r.nome)) !== -1; });
-    if (m) return m;
-    m = mapa.find(function (r) { return norm.length > 2 && normalizar(r.nome).indexOf(norm) !== -1; });
-    if (m) return m;
-    // Última tentativa: mesmo núcleo de nome ("R. Ator Paulo Gustavo" bate com
-    // "Rua Ator Paulo Gustavo"), só quando os tipos não se contradizem.
+    var exata = mapa.find(function (r) { return normalizar(r.nome) === norm; });
+    if (exata) return exata;
+
     var alvo = partesRua(ruaTexto);
-    if (!alvo.nucleo || alvo.nucleo.length < 3) return null;
-    m = mapa.find(function (r) {
-      var c = partesRua(r.nome);
-      if (c.tipo && alvo.tipo && c.tipo !== alvo.tipo) return false;
-      return c.nucleo === alvo.nucleo;
+
+    // Mesmo núcleo de nome ("R. Ator Paulo Gustavo" bate com "Rua Ator Paulo
+    // Gustavo"), só quando os tipos não se contradizem. Subiu pra cá porque é
+    // mais preciso do que comparar pedaço de texto: antes vinha depois, e uma
+    // coincidência de substring decidia a rua antes de o núcleo ser olhado.
+    if (alvo.nucleo && alvo.nucleo.length >= 3) {
+      var porNucleo = mapa.filter(function (r) {
+        var c = partesRua(r.nome);
+        if (c.tipo && alvo.tipo && c.tipo !== alvo.tipo) return false;
+        return c.nucleo === alvo.nucleo;
+      });
+      if (porNucleo.length) return soSeUnica(porNucleo);
+    }
+
+    // Um nome cabe inteiro dentro do outro — nos dois sentidos, porque tanto a
+    // lista pode vir com texto a mais (bairro colado no fim) quanto o cadastro
+    // pode ter o nome mais curto.
+    var porPedaco = mapa.filter(function (r) {
+      var rn = normalizar(r.nome);
+      return contemPalavrasInteiras(norm, rn) || contemPalavrasInteiras(rn, norm);
     });
-    if (m) return m;
+    if (porPedaco.length) return soSeUnica(porPedaco);
+
+    if (!alvo.nucleo || alvo.nucleo.length < 3) return null;
 
     // Daqui pra baixo só roda quando TODAS as tentativas acima já falharam —
     // ou seja, quando o pacote ia pra caixa cinza de qualquer jeito. Nada do
