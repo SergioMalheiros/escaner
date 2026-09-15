@@ -1295,6 +1295,7 @@
       if (r.maxImpar) o.maxImpar = r.maxImpar;
       if (r.corteManualPar) o.corteManualPar = r.corteManualPar;
       if (r.corteManualImpar) o.corteManualImpar = r.corteManualImpar;
+      if (r.cepVistos && Object.keys(r.cepVistos).length) o.cepVistos = r.cepVistos;
       return o;
     });
   }
@@ -3299,6 +3300,38 @@
     return det;
   }
 
+  // Formata CEP de 8 dígitos como "24220-000"; qualquer outra coisa (vazio,
+  // tamanho diferente) volta do jeito que veio, sem quebrar a tela.
+  function formatarCep(c) {
+    return (c && c.length === 8) ? (c.slice(0, 5) + "-" + c.slice(5)) : (c || "");
+  }
+  // Nunca vimos de perto o JSON cru pra saber o nome exato do campo de CEP
+  // (varia entre integrações — já se viu "receiverZipCode" e parecidos), então
+  // em vez de apostar num nome só e falhar caladinho se vier diferente,
+  // procura QUALQUER campo do registro cujo nome fale de CEP/ZIP/postcode,
+  // do jeito que tiver sido escrito. Palavra inteira (após separar
+  // camelCase/underscore) pra "cep"/"zip", pra não confundir com um campo
+  // tipo "exceptionCode" só porque tem as letras "cep" no meio.
+  function impjPareceCampoCep(chave) {
+    var achatado = chave.toLowerCase();
+    if (achatado.indexOf("zipcode") !== -1 || achatado.indexOf("postcode") !== -1 || achatado.indexOf("post_code") !== -1) return true;
+    var palavras = chave.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase().split("_");
+    return palavras.indexOf("cep") !== -1 || palavras.indexOf("zip") !== -1;
+  }
+  function impjExtrairCep(p) {
+    var candidatos = Object.keys(p || {}).filter(impjPareceCampoCep);
+    if (!candidatos.length) return null;
+    // Prefere um campo com "receiver" no nome (mesma convenção dos outros
+    // campos usados aqui) — evita pegar o CEP do remetente/galpão por engano
+    // quando existir mais de um campo parecido com CEP no registro.
+    candidatos.sort(function (a, b) { return (/receiver/i.test(a) ? 0 : 1) - (/receiver/i.test(b) ? 0 : 1); });
+    for (var i = 0; i < candidatos.length; i++) {
+      var v = (p[candidatos[i]] == null ? "" : String(p[candidatos[i]])).replace(/\D/g, "");
+      if (v) return v;
+    }
+    return null;
+  }
+
   // Extrai rua+número de UM pacote do JSON, tentando várias estratégias na
   // ordem — o endereço da J&T vem consistente na maior parte, mas com um bom
   // tanto de bagunça: campo de rua com o bairro em vez da rua, formato com
@@ -3308,10 +3341,11 @@
     var ruaRaw = (p.receiverStreet || "").trim();
     var numRaw = (p.receiverStreetNum || "").trim();
     var det = (p.receiverDetailedAddress || "").trim();
+    var cep = impjExtrairCep(p);
 
     function reg(rua, numero, metodo) {
       return {
-        nome: nome, rua: rua, numero: numero, metodo: metodo,
+        nome: nome, rua: rua, numero: numero, metodo: metodo, cep: cep,
         ruaRaw: p.receiverStreet, streetnumRaw: p.receiverStreetNum, detRaw: p.receiverDetailedAddress
       };
     }
@@ -3465,6 +3499,24 @@
       if (oficial) r.rua = oficial.nome;
       r.numero = impjNormalizarNumero(r.numero);
 
+      // Cada rua cadastrada vai "aprendendo" sozinha, com os próprios
+      // pacotes de todo dia, qual CEP é o dela — sem precisar de nenhuma
+      // fonte externa. Só desconfia depois de já conhecer a rua de verdade
+      // (pelo menos 3 pacotes vistos antes); antes disso é só ela ainda
+      // aprendendo, e todo mundo seria "CEP novo".
+      if (oficial && r.cep) {
+        var cepVistos = oficial.cepVistos || {};
+        var chavesCep = Object.keys(cepVistos);
+        var totalCepAntes = chavesCep.reduce(function (soma, k) { return soma + cepVistos[k]; }, 0);
+        if (totalCepAntes >= 3 && !cepVistos[r.cep]) {
+          chavesCep.sort(function (a, b) { return cepVistos[b] - cepVistos[a]; });
+          r.cepDivergente = true;
+          r.cepEsperado = chavesCep[0];
+        }
+        cepVistos[r.cep] = (cepVistos[r.cep] || 0) + 1;
+        oficial.cepVistos = cepVistos;
+      }
+
       var textoLivre = [r.ruaRaw, r.streetnumRaw, r.detRaw].filter(Boolean).join(" ");
       if (oficial && r.numero) {
         var corr = impjCorrigirPorFaixa(oficial, r.numero, textoLivre);
@@ -3496,6 +3548,7 @@
       if (r.semNumero) notas.push("SEM NÚMERO — usar a loja/referência ao lado");
       if (r.complemento) notas.push(r.complemento);
       if (r.foraDaFaixa) notas.push("conferir número — fora da faixa cadastrada");
+      if (r.cepDivergente) notas.push("conferir CEP — veio " + formatarCep(r.cep) + ", essa rua costuma ser " + formatarCep(r.cepEsperado));
       if (notas.length) nome += " (" + notas.join(" · ") + ")";
       return r.rua + ", " + r.numero + ", " + nome + ", " + r.codigo;
     }).join("\n");
@@ -3514,7 +3567,8 @@
       abnormais: completos.filter(function (r) { return r.abnormal; }),
       semNumero: completos.filter(function (r) { return r.semNumero; }),
       corrigidosPorFaixa: completos.filter(function (r) { return r.metodo.indexOf("+corrigido-faixa") !== -1; }),
-      foraDaFaixa: completos.filter(function (r) { return r.foraDaFaixa; })
+      foraDaFaixa: completos.filter(function (r) { return r.foraDaFaixa; }),
+      cepDivergente: completos.filter(function (r) { return r.cepDivergente; })
     };
   }
 
@@ -3549,6 +3603,10 @@
     if (!dados.length) { alert("O JSON não tem nenhum pacote dentro."); return; }
 
     var r = impjProcessarPacotes(dados);
+    // impjProcessarPacotes já atualizou state.mapaRuas em memória (o CEP
+    // aprendido de cada rua) — salva agora pra não perder isso se o app
+    // fechar, e sobe pra nuvem pra quem mais usa a mesma rota aprender junto.
+    salvarMapa();
     if (!r.total) { alert("Nenhum pacote saiu com endereço completo. Confira se colou o JSON certo."); return; }
 
     var avisos = [];
@@ -3569,6 +3627,10 @@
     if (r.foraDaFaixa.length) {
       avisos.push("ATENÇÃO: " + r.foraDaFaixa.length + " pacote(s) com número fora da faixa cadastrada e sem um número alternativo claro no endereço — confira antes de sair: " +
         r.foraDaFaixa.map(function (f) { return f.nome + " (" + f.rua + " " + f.numero + ", " + f.codigo + ")"; }).join(" · "));
+    }
+    if (r.cepDivergente.length) {
+      avisos.push("Aviso: " + r.cepDivergente.length + " pacote(s) com CEP diferente do costumeiro dessa rua — pode ser rua com nome parecido ou endereço trocado, vale conferir: " +
+        r.cepDivergente.map(function (f) { return f.nome + " (" + f.rua + " " + f.numero + ", " + f.codigo + ")"; }).join(" · "));
     }
     if (r.removidosBase) avisos.push("(" + r.removidosBase + " registro(s) duplicado(s) de pedidos com peças foram descartados sem afetar a contagem.)");
 
@@ -3633,6 +3695,22 @@
 
     html += renderListaGrupos(resultado);
     return html;
+  }
+
+  // Texto de transparência da aba Faixas: mostra o que essa rua já aprendeu
+  // sozinha de CEP, pra dar pra conferir que o mecanismo tá funcionando (e
+  // não só confiar cego nele).
+  function textoCepRua(r) {
+    var vistos = r.cepVistos || {};
+    var chaves = Object.keys(vistos);
+    if (!chaves.length) return "Ainda sem CEP suficiente — vai aprendendo sozinho conforme os pacotes chegam pela importação do JSON.";
+    chaves.sort(function (a, b) { return vistos[b] - vistos[a]; });
+    var principal = chaves[0];
+    var outros = chaves.length - 1;
+    var totalOutros = chaves.slice(1).reduce(function (soma, k) { return soma + vistos[k]; }, 0);
+    var txt = "CEP mais visto: " + formatarCep(principal) + " (" + vistos[principal] + "x)";
+    if (outros > 0) txt += " · mais " + outros + " CEP(s) diferente(s) já visto(s) (" + totalOutros + "x no total)";
+    return txt;
   }
 
   function renderMapa() {
@@ -3731,6 +3809,12 @@
         '<div style="flex:1"><span style="font-size:11px;opacity:.65">lado ímpar</span><br>' +
         '<input type="number" min="0" data-max-rua="' + r.id + '" data-lado="impar" value="' + (r.maxImpar ? r.maxImpar : "") + '" placeholder="ex: 471" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
         "</div></div>";
+
+      html += '<div style="padding:10px 12px;border-top:1px solid var(--line)">' +
+        '<p style="font-size:11px;font-weight:600;margin:0 0 2px;opacity:.65">CEP</p>' +
+        '<p style="font-size:11px;margin:0;opacity:.55">' + esc(textoCepRua(r)) + "</p>" +
+        '<p style="font-size:11px;margin:6px 0 0;opacity:.5">Aprendido sozinho com os pacotes de cada dia — só avisa quando um pacote chega com CEP diferente do costumeiro dessa rua (rua com nome parecido, endereço trocado). Não muda cor nem separação.</p>' +
+        "</div>";
 
       html += '<div style="padding:4px 12px 10px;border-top:1px solid var(--line)">' +
         '<p style="font-size:11px;font-weight:600;margin:8px 0 0;opacity:.65">CORES</p>';
