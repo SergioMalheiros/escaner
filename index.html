@@ -245,12 +245,29 @@
   // se tivesse dado certo. Com timestamp no nome, cada envio vira um arquivo
   // realmente novo, e o app sempre usa a URL do envio mais recente (é essa
   // URL que fica salva no Firebase).
-  function subirParaCloudinary(blob, pasta, nomeArquivo) {
+  // Etiqueta pro Cloudinary: só letra, número, hífen e sublinhado.
+  function tagCloudinary(s) {
+    return String(s == null ? "" : s).replace(/[^A-Za-z0-9_-]+/g, "-").replace(/(^-+|-+$)/g, "");
+  }
+  // As fotos NUNCA são apagadas do Cloudinary: o registro delas sai do Firebase
+  // depois de 2 dias, mas a imagem fica pra sempre e o plano gratuito vai
+  // encher. Apagar daqui não dá — precisaria da chave secreta da conta dentro
+  // do app, e aí qualquer um que abrisse o app poderia apagar as fotos de
+  // todo mundo. Automatizar de verdade exigiria um pedaço de servidor.
+  //
+  // O que dá pra fazer é deixar a limpeza manual ser rápida: cada envio vai
+  // etiquetado com a rota e o dia, então no Media Library dá pra filtrar
+  // "data-2026-09-15" e apagar tudo daquele dia de uma vez, em vez de caçar
+  // pasta por pasta. A fachada vai com etiqueta PRÓPRIA e sem data, de
+  // propósito: ela vale pra rota inteira e pra sempre, então não pode ser
+  // levada junto numa limpeza por dia.
+  function subirParaCloudinary(blob, pasta, nomeArquivo, tags) {
     var formData = new FormData();
     formData.append("file", blob, nomeArquivo + ".jpg");
     formData.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
     formData.append("folder", pasta);
     formData.append("public_id", nomeArquivo);
+    if (tags && tags.length) formData.append("tags", tags.join(","));
 
     return fetch("https://api.cloudinary.com/v1_1/" + CLOUDINARY_CLOUD_NAME + "/image/upload", {
       method: "POST",
@@ -463,12 +480,16 @@
     // guardada pra reenviar, em vez de sumir. É a fila que garante que a foto
     // nunca se perde — e ela é o comprovante de entrega.
     guardarNaFila(item, blob).then(function () {
-      return subirParaCloudinary(blob, item.pasta, item.nomeArquivo);
+      return subirParaCloudinary(blob, item.pasta, item.nomeArquivo, item.tags);
     }).then(function (url) {
       return gravarFotoNoFirebase(item, url);
     }).then(function () {
       // Confirmado dos dois lados: agora sim pode sair da fila.
       state.filaPendente = state.filaPendente.filter(function (p) { return p.id !== item.id; });
+      // Deu certo, então o aviso de recusa não vale mais. Antes ele era escrito
+      // e nunca apagado: bastava UMA recusa pra a tela ficar avisando de um
+      // problema já resolvido pelo resto do dia.
+      state.avisoEnvio = "";
       salvarFila();
       render();
     }).catch(function (err) {
@@ -477,7 +498,14 @@
       // falha, inclusive o Cloudinary recusando por limite de envios —
       // antes esse caso jogava a foto fora na hora, com um alerta.
       if (err && err.respostaInvalida) {
-        state.avisoEnvio = "O Cloudinary recusou o envio agora (" + (err.message || "") .slice(0, 80) + "). A foto está guardada e vai ser reenviada — dá pra forçar no botão de pendentes.";
+        var respostaCloudinary = String((err && err.message) || "");
+        // Conta cheia é o caso que vai acontecer de verdade um dia (as fotos
+        // nunca são apagadas de lá), e dizer só "recusou o envio" não ajuda
+        // ninguém a resolver às 6 da manhã no galpão. Então quando a resposta
+        // tem cara de limite estourado, a mensagem diz o que fazer.
+        state.avisoEnvio = /quota|limit|usage|420|too many|exceed/i.test(respostaCloudinary)
+          ? "A conta do Cloudinary parece ter batido no limite do plano. As fotos estão guardadas aqui e não se perdem, mas não sobem até liberar espaço. Pra liberar: no Media Library do Cloudinary, filtre pela etiqueta de um dia antigo (data-AAAA-MM-DD) e apague — as fachadas têm etiqueta própria e não entram nesse filtro."
+          : "O Cloudinary recusou o envio agora (" + respostaCloudinary.slice(0, 80) + "). A foto está guardada e vai ser reenviada — dá pra forçar no botão de pendentes.";
       }
       contarFalhaDeEnvio(item, err);
       render();
@@ -510,7 +538,7 @@
       }
       var item = pendentes[i];
       Promise.resolve().then(function () {
-        return subirParaCloudinary(base64ParaBlob(item.blobBase64), item.pasta, item.nomeArquivo);
+        return subirParaCloudinary(base64ParaBlob(item.blobBase64), item.pasta, item.nomeArquivo, item.tags);
       }).then(function (url) {
         // Espera o Firebase CONFIRMAR antes de tirar da fila. Sem esse await,
         // uma gravação que ficasse só bufferizada (offline) sumia da fila
@@ -518,6 +546,7 @@
         return gravarFotoNoFirebase(item, url);
       }).then(function () {
         state.filaPendente = state.filaPendente.filter(function (p) { return p.id !== item.id; });
+        state.avisoEnvio = "";
         salvarFila();
       }).catch(function (err) {
         // Deixa na fila e tenta o próximo. Mas CONTA a tentativa quando a falha
@@ -854,7 +883,10 @@
         tipo: "fachada",
         pasta: "fotos/" + chaveRotaFachada + "/fachadas/" + chaveFachada,
         nomeArquivo: "fachada_" + Date.now(),
-        chaveRota: chaveRotaFachada, chave: chaveFachada, rua: lote.ruaNome, numero: lote.numero
+        chaveRota: chaveRotaFachada, chave: chaveFachada, rua: lote.ruaNome, numero: lote.numero,
+        // Sem etiqueta de data: fachada vale pra sempre e não pode sair numa
+        // limpeza por dia (ver subirParaCloudinary).
+        tags: ["rota-" + tagCloudinary(chaveRotaFachada), "fachada"]
       };
       processarEnvioFoto(itemFachada, lote.fotos[0].blob);
       lote.fotos.forEach(function (f) { URL.revokeObjectURL(f.previewUrl); });
@@ -887,7 +919,8 @@
           nomeArquivo: "pacote_" + linha.codigo + "_" + Date.now() + "_" + idx + "_" + slotIdx,
           linhaId: linha.id, chaveRota: chaveRota, data: data, codigo: linha.codigo,
           rua: linha.rua, numero: linha.numero, nome: linha.nome || "", chave: chave, slotIdx: slotIdx,
-          quemRecebeuSnapshot: (state.entregaInfo[linha.id] && state.entregaInfo[linha.id].quemRecebeu) || ""
+          quemRecebeuSnapshot: (state.entregaInfo[linha.id] && state.entregaInfo[linha.id].quemRecebeu) || "",
+          tags: ["rota-" + tagCloudinary(chaveRota), "data-" + data]
         };
         processarEnvioFoto(item, f.blob);
       });
