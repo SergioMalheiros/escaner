@@ -4097,5 +4097,20 @@
   }
 })();
 </script>
+<script>
+  // Liga o cache offline (ver sw.js) — é o que faz o app abrir sem internet,
+  // em vez de dar tela branca. Fica fora do app principal de propósito: se
+  // qualquer coisa der errado aqui, ou o navegador não tiver suporte, o app
+  // continua funcionando exatamente como antes, só sem o offline.
+  //
+  // Caminho relativo ("sw.js", não "/sw.js") porque o app pode estar publicado
+  // numa subpasta — com a barra na frente ele procuraria na raiz do domínio e
+  // o registro falharia calado.
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("sw.js").catch(function () {});
+    });
+  }
+</script>
 </body>
 </html>
