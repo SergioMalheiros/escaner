@@ -186,7 +186,8 @@
     return Math.round((b - a) / 86400000);
   }
   function chaveOrdenavel(ruaNome, numero) {
-    var n = parseInt(numero, 10);
+    var bruto = String(numero == null ? "" : numero);
+    var n = parseInt(bruto, 10);
     var numPad = isNaN(n) ? "999999" : String(n).padStart(6, "0");
     var ruaChave = normalizar(ruaNome).replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
     // O sufixo preserva o que vem DEPOIS do número (a letra do "120A", o
@@ -195,8 +196,20 @@
     // um baixava a pasta do outro, e o modo "loja por loja" ligava nos dois
     // juntos. O número continua no começo da chave, então a ordenação da
     // lista (que é o motivo da chave existir) não muda.
-    var resto = normalizar(String(numero == null ? "" : numero)).replace(/[^a-z0-9]+/g, "");
-    var sufixo = isNaN(n) ? resto : resto.replace(String(n), "");
+    //
+    // O sufixo é o que sobra DEPOIS dos dígitos do começo. Antes ele era achado
+    // apagando o número do texto, e aí "007" virava sufixo "00" (o replace
+    // tirava só o primeiro "7") — ou seja, "007" e "7" eram endereços
+    // DIFERENTES pro app: duas pastas de foto pra mesma casa, dois botões
+    // "Baixar" e a fachada de um não valia pro outro. Pegar o resto direto não
+    // tem esse efeito colateral.
+    var sufixo;
+    if (isNaN(n)) {
+      sufixo = normalizar(bruto).replace(/[^a-z0-9]+/g, "");
+    } else {
+      var depoisDosDigitos = bruto.match(/^\s*\d+([\s\S]*)$/);
+      sufixo = normalizar(depoisDosDigitos ? depoisDosDigitos[1] : "").replace(/[^a-z0-9]+/g, "");
+    }
     return ruaChave + "_" + numPad + (sufixo ? "-" + sufixo : "");
   }
   function comprimirImagem(file, maxLado, qualidade) {
