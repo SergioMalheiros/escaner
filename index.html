@@ -615,7 +615,7 @@
     if (state.loteFoto) empilharHistoricoLote();
   });
 
-  function abrirLoteFoto(ruaNome, numero) {
+  function abrirLoteFoto(ruaNome, numero, itemIdPreferido) {
     if (!state.linhasParseadas) return;
     // Mesma regra que monta as caixas na tela (linhasDoEndereco): compara
     // pelo nome CANÔNICO quando a rua está cadastrada nas Faixas e pelo nome
@@ -649,6 +649,22 @@
         alert("A foto desse endereço já foi tirada e está guardada esperando internet pra subir.\n\nEla sobe sozinha quando o sinal voltar — dá pra forçar no aviso de pendentes lá em cima.");
       }
       return;
+    }
+    // O botão "Foto" de UM pacote específico (em endereço com vários) cai no
+    // mesmo lote de quem ainda não tem foto — mas quem clicou ali quer
+    // fotografar ESSE, não necessariamente o primeiro da lista (ex: quem
+    // atendeu a porta foi o 6º nome, não o 1º). A câmera tira sempre na
+    // ordem de "itens" (ver tirarFotoLote), então bota o preferido na
+    // frente pra ser o primeiro a receber foto; do 2º clique em diante
+    // segue normal pros próximos que ainda não têm. Sem isso a 1ª foto
+    // sempre ia pro 1º da lista, não pro pacote que a pessoa realmente
+    // apontou.
+    if (itemIdPreferido) {
+      var idxPreferido = itens.findIndex(function (l) { return l.id === itemIdPreferido; });
+      if (idxPreferido > 0) {
+        var preferido = itens.splice(idxPreferido, 1)[0];
+        itens.unshift(preferido);
+      }
     }
     definirFoco("endereco-" + chaveOrdenavel(ruaNome, numero));
     state.loteFoto = { tipo: "pacotes", ruaNome: ruaNome, numero: numero, itens: itens, fotos: [], statusCamera: "pedindo", erro: "" };
@@ -3038,7 +3054,7 @@
             '<button data-action="foto-extra-pacote" data-id="' + item.id + '" class="pill" title="Adicionar mais uma foto a esse pacote">+ \ud83d\udcf7</button>' +
             '<button data-action="apagar-foto-pacote" data-id="' + item.id + '" class="pill" style="background:var(--alert);color:#fff">\ud83d\uddd1\ufe0f</button>';
         } else {
-          botaoFoto = '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (fotoPacotePendente ? " ativo-pendente" : "") + '">' +
+          botaoFoto = '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" data-id="' + item.id + '" class="pill' + (fotoPacotePendente ? " ativo-pendente" : "") + '">' +
             (fotoPacotePendente ? "\u23f3" : "\u{1F4F7}") + " Foto</button>";
         }
         html += '<li id="pacote-' + item.id + '" style="padding:' + recuo + ';border-top:1px solid var(--line)">' +
@@ -3727,7 +3743,7 @@
       el.onclick = function () { apagarFachada(el.getAttribute("data-chave")); };
     });
     app.querySelectorAll('[data-action="foto-lote"]').forEach(function (el) {
-      el.onclick = function () { abrirLoteFoto(el.getAttribute("data-rua"), el.getAttribute("data-numero")); };
+      el.onclick = function () { abrirLoteFoto(el.getAttribute("data-rua"), el.getAttribute("data-numero"), el.getAttribute("data-id")); };
     });
     app.querySelectorAll('[data-action="quem-recebeu"]').forEach(function (el) {
       var id = el.getAttribute("data-id");
