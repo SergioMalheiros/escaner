@@ -994,16 +994,31 @@
       if (!ruaMatch) return;
       var n = parseInt(l.numero, 10);
       if (isNaN(n)) return;
-      if (!porRua[ruaMatch.id]) porRua[ruaMatch.id] = { par: [], impar: [] };
+      if (!porRua[ruaMatch.id]) porRua[ruaMatch.id] = { par: [], impar: [], ruaObj: ruaMatch };
       porRua[ruaMatch.id][n % 2 === 0 ? "par" : "impar"].push(n);
     });
     Object.keys(porRua).forEach(function (ruaId) {
       var pares = porRua[ruaId].par.slice().sort(function (a, b) { return a - b; });
       var impares = porRua[ruaId].impar.slice().sort(function (a, b) { return a - b; });
+      var ruaObj = porRua[ruaId].ruaObj;
+      var parCorteAuto = pares.length ? pares[Math.ceil(pares.length / 2) - 1] : null;
+      var imparCorteAuto = impares.length ? impares[Math.ceil(impares.length / 2) - 1] : null;
+      // "Onde termina a 1ª metade" (opcional, em Faixas) deixa quem já conhece
+      // a rota corrigir o corte automático — que é só a mediana por
+      // quantidade de pacote, e por isso pode cair num lugar estranho quando
+      // um único número concentra muita encomenda (ex: um shopping inteiro
+      // puxando a "metade" pra longe do meio de verdade da rua). Em branco,
+      // continua tudo igual a antes.
+      var parManual = ruaObj.corteManualPar != null ? ruaObj.corteManualPar : null;
+      var imparManual = ruaObj.corteManualImpar != null ? ruaObj.corteManualImpar : null;
       splits[ruaId] = {
-        parCorte: pares.length ? pares[Math.ceil(pares.length / 2) - 1] : null,
+        parCorte: parManual != null ? parManual : parCorteAuto,
+        parCorteAuto: parCorteAuto,
+        parManual: parManual != null,
         parTotal: pares.length,
-        imparCorte: impares.length ? impares[Math.ceil(impares.length / 2) - 1] : null,
+        imparCorte: imparManual != null ? imparManual : imparCorteAuto,
+        imparCorteAuto: imparCorteAuto,
+        imparManual: imparManual != null,
         imparTotal: impares.length
       };
     });
@@ -1278,6 +1293,8 @@
       };
       if (r.maxPar) o.maxPar = r.maxPar;
       if (r.maxImpar) o.maxImpar = r.maxImpar;
+      if (r.corteManualPar) o.corteManualPar = r.corteManualPar;
+      if (r.corteManualImpar) o.corteManualImpar = r.corteManualImpar;
       return o;
     });
   }
@@ -1446,6 +1463,23 @@
     if (lado === "par") rua.maxPar = (valor && n > 0) ? n : undefined;
     else rua.maxImpar = (valor && n > 0) ? n : undefined;
     salvarMapa();
+  }
+  // Onde termina a 1ª metade do PAR/ÍMPAR fragmentado (opcional) — corrige o
+  // corte automático (mediana por quantidade de pacote) pela geografia real
+  // da rua, na mão de quem já roda ela. Em branco, some e volta a valer só o
+  // corte automático. Diferente de definirMaxRua, este AFETA o que já está
+  // na tela agora mesmo (o texto "corte no nº X" em Faixas e as cores da aba
+  // Hoje), por isso re-renderiza — seguro aqui porque "onchange" só dispara
+  // quando o campo já perdeu o foco, nunca no meio da digitação.
+  function definirCorteManual(ruaId, lado, valor) {
+    var rua = state.mapaRuas.find(function (r) { return r.id === ruaId; });
+    if (!rua) return;
+    var n = parseInt(valor, 10);
+    var v = (valor && n > 0) ? n : undefined;
+    if (lado === "par") rua.corteManualPar = v;
+    else rua.corteManualImpar = v;
+    salvarMapa();
+    render();
   }
   function definirCor(ruaId, campo, hex) {
     var rua = state.mapaRuas.find(function (r) { return r.id === ruaId; });
@@ -2964,14 +2998,64 @@
     return html;
   }
 
+  // Pra cada grupo PAR/\u00cdMPAR da aba Hoje, acha os \u00edndices dos grupos da
+  // MESMA rua com o lado oposto (pode haver mais de um quando a rua est\u00e1
+  // fragmentada em 4 cores) \u2014 usado pelo bot\u00e3o "ver [outro lado] desta rua"
+  // do cabe\u00e7alho flutuante. Caixas SEM FAIXA/SEM N\u00ba n\u00e3o t\u00eam "outro lado".
+  function candidatosOutroLado(grupos, idx) {
+    var atual = grupos[idx];
+    if (!atual || atual.semFaixa) return [];
+    var labelAlvo = atual.label === "PAR" ? "\u00cdMPAR" : "PAR";
+    var out = [];
+    grupos.forEach(function (g, i) {
+      if (i !== idx && !g.semFaixa && g.ruaNome === atual.ruaNome && g.label === labelAlvo) out.push(i);
+    });
+    return out;
+  }
+  // Guarda, por grupo (card) da aba Hoje, o scrollY de onde a pessoa saiu da
+  // \u00faltima vez ao trocar de lado PAR/\u00cdMPAR \u2014 s\u00f3 nesta sess\u00e3o do navegador
+  // (n\u00e3o precisa persistir). Assim, voltar pra um lado j\u00e1 visitado cai
+  // exatamente onde a pessoa parou, em vez de voltar sempre pro topo do
+  // grupo. Se houver mais de um candidato (rua fragmentada em 4 cores),
+  // prefere o que j\u00e1 foi visitado; sem nenhum visitado, vai pro primeiro.
+  var ultimaPosicaoGrupo = {};
+  function irParaOutroLado(idOrigem, idsAlvo) {
+    if (idOrigem) ultimaPosicaoGrupo[idOrigem] = window.scrollY;
+    var candidatos = (idsAlvo || "").split(",").filter(Boolean);
+    var idEscolhido = candidatos.filter(function (id) { return ultimaPosicaoGrupo.hasOwnProperty(id); })[0] || candidatos[0];
+    if (!idEscolhido) return;
+    if (ultimaPosicaoGrupo.hasOwnProperty(idEscolhido)) {
+      window.scrollTo({ top: ultimaPosicaoGrupo[idEscolhido], behavior: "smooth" });
+    } else {
+      var alvo = document.getElementById(idEscolhido);
+      if (alvo) alvo.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
   function renderListaGrupos(resultado) {
     var html = "";
-    resultado.listaGrupos.forEach(function (g) {
+    var grupos = resultado.listaGrupos;
+    grupos.forEach(function (g, idxGrupo) {
+      var idGrupo = "grupo-" + idxGrupo;
       var separadosNaCaixa = g.itens.filter(function (it) { return statusDe(it.id).separado; }).length;
-      html += '<div class="card" style="overflow:hidden;margin-bottom:12px">' +
+      // Nota: o .card N\u00c3O pode ter overflow:hidden \u2014 quebraria o "sticky" do
+      // cabe\u00e7alho abaixo (ele ficaria preso ao pr\u00f3prio card, que nunca rola,
+      // em vez de rolar junto com a p\u00e1gina). O arredondado vem do cabe\u00e7alho
+      // (topo) e do <ul> (base) em vez de recortar a caixa inteira.
+      html += '<div class="card" id="' + idGrupo + '" style="margin-bottom:12px">' +
+        '<div style="position:sticky;top:0;z-index:5;overflow:hidden;border-radius:9px 9px 0 0">' +
         '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:' + g.cor + '">' +
         '<span style="font-size:14px;font-weight:700;flex:1;color:' + corTextoParaHex(g.cor) + '">' + g.label + " \u00b7 " + esc(g.ruaNome) + "</span>" +
-        '<span style="font-size:11px;font-family:ui-monospace,monospace;color:' + corTextoParaHex(g.cor) + ';opacity:.85">' + separadosNaCaixa + "/" + g.total + "</span></div><ul style='list-style:none;margin:0;padding:0'>";
+        '<span style="font-size:11px;font-family:ui-monospace,monospace;color:' + corTextoParaHex(g.cor) + ';opacity:.85">' + separadosNaCaixa + "/" + g.total + "</span></div>";
+
+      var outroLado = candidatosOutroLado(grupos, idxGrupo);
+      if (outroLado.length) {
+        var idsAlvo = outroLado.map(function (i) { return "grupo-" + i; }).join(",");
+        var labelAlvo = grupos[outroLado[0]].label;
+        var totalAlvo = grupos[outroLado[0]].total;
+        html += '<button data-action="ir-outro-lado" data-origem="' + idGrupo + '" data-alvos="' + idsAlvo + '" style="display:block;width:100%;text-align:center;padding:7px 10px;border:none;border-top:1px solid rgba(0,0,0,.12);background:var(--paper-deep);color:var(--ink);font-weight:600;font-size:12px;font-family:inherit;cursor:pointer">\u2195 Ver ' + labelAlvo + " desta rua \u00b7 " + totalAlvo + " pacotes</button>";
+      }
+
+      html += "</div><ul style='list-style:none;margin:0;padding:0;overflow:hidden;border-radius:0 0 9px 9px'>";
 
       var contagemPorNumero = {};
       g.itens.forEach(function (it) { contagemPorNumero[it.numero] = (contagemPorNumero[it.numero] || 0) + 1; });
@@ -3615,7 +3699,7 @@
         "Fragmentar em 4 cores, com base nos n\u00fameros de hoje</label>";
       if (s && (s.parTotal || s.imparTotal)) {
         if (fragmentado) {
-          html += '<p style="font-size:11px;margin:6px 0 0;opacity:.6">hoje: ' + s.parTotal + " pares (corte no n\u00ba " + (s.parCorte != null ? s.parCorte : "\u2014") + ") \u00b7 " + s.imparTotal + " \u00edmpares (corte no n\u00ba " + (s.imparCorte != null ? s.imparCorte : "\u2014") + ")</p>";
+          html += '<p style="font-size:11px;margin:6px 0 0;opacity:.6">hoje: ' + s.parTotal + " pares (corte no n\u00ba " + (s.parCorte != null ? s.parCorte : "\u2014") + (s.parManual ? " \u00b7 manual" : "") + ") \u00b7 " + s.imparTotal + " \u00edmpares (corte no n\u00ba " + (s.imparCorte != null ? s.imparCorte : "\u2014") + (s.imparManual ? " \u00b7 manual" : "") + ")</p>";
         } else {
           html += '<p style="font-size:11px;margin:6px 0 0;opacity:.6">hoje: ' + s.parTotal + " pares \u00b7 " + s.imparTotal + " \u00edmpares</p>";
         }
@@ -3623,6 +3707,20 @@
         html += '<p style="font-size:11px;margin:6px 0 0;opacity:.5">carregue a lista de hoje pra ver a contagem.</p>';
       }
       html += "</div>";
+
+      // Só faz sentido "onde termina a 1ª metade" quando a rua está de fato
+      // fragmentada em 4 cores — sem fragmentar não existe metade nenhuma.
+      if (fragmentado) {
+        html += '<div style="padding:10px 12px;border-top:1px solid var(--line)">' +
+          '<p style="font-size:11px;font-weight:600;margin:0 0 2px;opacity:.65">ONDE TERMINA A 1ª METADE (opcional)</p>' +
+          '<p style="font-size:11px;margin:0 0 8px;opacity:.55">Em branco, usa o corte automático de hoje (mostrado acima). Preenchido, esse número manda — 1ª metade até ele, 2ª metade dali em diante. Útil quando um só número concentra muita encomenda e puxa o corte automático pra longe do meio de verdade da rua.</p>' +
+          '<div style="display:flex;gap:10px">' +
+          '<div style="flex:1"><span style="font-size:11px;opacity:.65">lado par</span><br>' +
+          '<input type="number" min="0" data-corte-manual="' + r.id + '" data-lado="par" value="' + (r.corteManualPar ? r.corteManualPar : "") + '" placeholder="' + (s && s.parCorteAuto != null ? String(s.parCorteAuto) : "automático") + '" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
+          '<div style="flex:1"><span style="font-size:11px;opacity:.65">lado ímpar</span><br>' +
+          '<input type="number" min="0" data-corte-manual="' + r.id + '" data-lado="impar" value="' + (r.corteManualImpar ? r.corteManualImpar : "") + '" placeholder="' + (s && s.imparCorteAuto != null ? String(s.imparCorteAuto) : "automático") + '" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
+          "</div></div>";
+      }
 
       html += '<div style="padding:10px 12px;border-top:1px solid var(--line)">' +
         '<p style="font-size:11px;font-weight:600;margin:0 0 2px;opacity:.65">ATÉ QUE NÚMERO VAI ESSA RUA (opcional)</p>' +
@@ -3801,6 +3899,12 @@
     });
     app.querySelectorAll("[data-max-rua]").forEach(function (el) {
       el.onchange = function () { definirMaxRua(el.getAttribute("data-max-rua"), el.getAttribute("data-lado"), el.value); };
+    });
+    app.querySelectorAll("[data-corte-manual]").forEach(function (el) {
+      el.onchange = function () { definirCorteManual(el.getAttribute("data-corte-manual"), el.getAttribute("data-lado"), el.value); };
+    });
+    app.querySelectorAll('[data-action="ir-outro-lado"]').forEach(function (el) {
+      el.onclick = function () { irParaOutroLado(el.getAttribute("data-origem"), el.getAttribute("data-alvos")); };
     });
     app.querySelectorAll('[data-action="abrir-paleta"]').forEach(function (el) {
       el.onclick = function () { toggleAbrirPaleta(el.getAttribute("data-chave")); };
