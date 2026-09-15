@@ -30,6 +30,13 @@
     "(o codigo passa de boca em boca). Para ir alem disso seria preciso um dono",
     "por rota e convite de colega, que e um redesenho bem maior.",
     "",
+    "O no 'pin' guarda o PIN de 4 digitos da rota ja embaralhado, com tempero",
+    "proprio - nunca o PIN em si. Vale lembrar que ele e uma tranca do app, nao",
+    "destas regras: a conferencia acontece no aparelho, e 4 digitos sao 10 mil",
+    "combinacoes. Ele serve pra separar rota de rota entre colegas leigos, nao",
+    "pra segurar quem tem conhecimento tecnico. Quem protege de verdade contra",
+    "gente de fora sao as regras aqui.",
+    "",
     "Use codigos de rota longos e nao obvios - eles sao a senha da rota."
   ],
 
@@ -61,6 +68,15 @@
       "$rota": {
         ".read": "auth != null",
         ".write": "auth != null",
+
+        "pin": {
+          ".validate": "newData.hasChildren(['hash','salt','alg'])",
+          "hash": { ".validate": "newData.isString() && newData.val().length <= 128" },
+          "salt": { ".validate": "newData.isString() && newData.val().length <= 64" },
+          "alg": { ".validate": "newData.isString() && (newData.val() === 'sha256' || newData.val() === 'simples')" },
+          "ts": { ".validate": "newData.isNumber()" },
+          "$outro": { ".validate": false }
+        },
 
         "faixas": {
           "ts": { ".validate": "newData.isNumber()" },

@@ -625,12 +625,17 @@
     // slot que ninguém foi conferir. Pra um pacote com 2 fotos (ex: loja
     // específica), é tirar as 2 de novo, rapidinho.
     if (!confirm(n > 1 ? "Apagar essas " + n + " fotos desse pacote? Depois dá pra tirar novas." : "Apagar essa foto? Depois dá pra tirar uma nova.")) return;
-    if (state.entregaInfo[linhaId]) state.entregaInfo[linhaId].fotos = {};
-    if (fbDb && state.minhaRota && linha.codigo) {
-      var chaveRota = sanitizarChaveFirebase(state.minhaRota);
-      fbDb.ref("lotes/" + chaveRota + "/entregas/" + dataDeHoje() + "/" + linha.codigo + "/fotos").remove();
-    }
-    render();
+    // Foto é comprovante de entrega e some pra todo mundo da rota, então pede o
+    // PIN — protege tanto de um toque errado quanto de alguém de fora.
+    exigirPin(n > 1 ? "Apagar " + n + " fotos deste pacote" : "Apagar a foto deste pacote").then(function (liberado) {
+      if (!liberado) return;
+      if (state.entregaInfo[linhaId]) state.entregaInfo[linhaId].fotos = {};
+      if (fbDb && state.minhaRota && linha.codigo) {
+        var chaveRota = sanitizarChaveFirebase(state.minhaRota);
+        fbDb.ref("lotes/" + chaveRota + "/entregas/" + dataDeHoje() + "/" + linha.codigo + "/fotos").remove();
+      }
+      render();
+    });
   }
 
   // "Esqueci de fotografar a frente da loja e só fui perceber depois de já
@@ -671,12 +676,17 @@
   // primeiro pra o botão voltar a abrir a câmera pra uma foto nova.
   function apagarFachada(chave) {
     if (!confirm("Apagar essa foto de fachada? Ela vale pra rota inteira (não só hoje), então some pra todo mundo que usa esse código de rota. Depois dá pra tirar uma nova.")) return;
-    if (state.fachadaInfo[chave] !== undefined) delete state.fachadaInfo[chave];
-    if (fbDb && state.minhaRota) {
-      var chaveRota = sanitizarChaveFirebase(state.minhaRota);
-      fbDb.ref("lotes/" + chaveRota + "/fachadas_permanentes/" + chave).remove();
-    }
-    render();
+    // A fachada vale pra rota inteira e pra sempre — é a que mais custa perder
+    // por engano, então também passa pelo PIN.
+    exigirPin("Apagar a fachada deste endereço (vale pra rota inteira)").then(function (liberado) {
+      if (!liberado) return;
+      if (state.fachadaInfo[chave] !== undefined) delete state.fachadaInfo[chave];
+      if (fbDb && state.minhaRota) {
+        var chaveRota = sanitizarChaveFirebase(state.minhaRota);
+        fbDb.ref("lotes/" + chaveRota + "/fachadas_permanentes/" + chave).remove();
+      }
+      render();
+    });
   }
 
   // ---------- câmera ao vivo por endereço (pacotes e fachada) ----------
@@ -1389,6 +1399,15 @@
     paletaAberta: null,
     minhaRota: "",
     rotaConectada: false,
+    // Registro do PIN da rota conectada (embaralhado, nunca o PIN em si).
+    pinRota: null,
+    verificandoPin: false,
+    pinForm: { atual: "", novo: "" },
+    // Código de uma rota que está salva aqui mas ainda NÃO foi destrancada
+    // (a pessoa cancelou ou errou o PIN). Serve só pra deixar o campo
+    // preenchido; enquanto ele estiver aqui em vez de minhaRota, o app não
+    // escreve nada na nuvem daquela rota.
+    rotaPendentePin: "",
     // null = ainda não sei (nada visto sobre a conexão); true/false = o
     // Firebase disse. Usado pra não mentir "conectado" quando o sinal cai.
     conexaoViva: null,
@@ -1630,9 +1649,14 @@
     var aviso = "Apagar a rua \"" + ((rua && rua.nome) || "") + "\" das Faixas?";
     if (fbDb && state.minhaRota) aviso += "\n\nIsso vale pra todo mundo que usa o código de rota " + state.minhaRota + ".";
     if (!confirm(aviso)) return;
-    state.mapaRuas = state.mapaRuas.filter(function (r) { return r.id !== id; });
-    salvarMapa();
-    render();
+    // Apagar rua desconfigura a separação por cor de todo mundo da rota, então
+    // também pede o PIN.
+    exigirPin("Apagar a rua \"" + ((rua && rua.nome) || "") + "\" das Faixas").then(function (liberado) {
+      if (!liberado) return;
+      state.mapaRuas = state.mapaRuas.filter(function (r) { return r.id !== id; });
+      salvarMapa();
+      render();
+    });
   }
   function toggleFragmentar(ruaId, valor) {
     var rua = state.mapaRuas.find(function (r) { return r.id === ruaId; });
@@ -2085,11 +2109,208 @@
   // perguntar de novo.
   var listasRecusadas = {};
 
-  function salvarMinhaRota(rota) {
+  // ---------- PIN da rota ----------
+  // Uma tranca simples pra que quem souber (ou adivinhar) o código de uma rota
+  // não caia dentro dela sem mais nada, e pra que apagar rua ou foto — as duas
+  // coisas que somem pra TODO MUNDO da rota — não aconteçam num toque errado
+  // ou por alguém de fora.
+  //
+  // Sobre o tamanho disso: são 4 dígitos, ou seja 10 mil combinações, e a
+  // conferência é feita aqui no aparelho. Quem tiver conhecimento técnico passa
+  // por cima — dá pra abrir o console do navegador e contornar. Isso é
+  // proposital e conhecido: serve pra separar rota de rota entre colegas, não
+  // pra segurar quem quer invadir. A tranca de verdade são as regras do banco
+  // (database.rules.json), que exigem credencial e impedem listar as rotas.
+  //
+  // O PIN não é guardado em texto: vai o resultado embaralhado dele junto com
+  // um tempero aleatório da rota. Não vira segurança de verdade (4 dígitos se
+  // testam rápido), mas evita que ele apareça de bandeja pra quem olhar o banco.
+  var PIN_FORMATO = /^\d{4}$/;
+
+  function algPinDisponivel() {
+    return (window.crypto && window.crypto.subtle && window.TextEncoder) ? "sha256" : "simples";
+  }
+  // Reserva pra navegador sem o embaralhador nativo (contexto não seguro, por
+  // exemplo). O "alg" fica gravado junto do PIN, então um aparelho confere
+  // sempre do mesmo jeito que o outro gravou — senão o mesmo PIN daria
+  // resultados diferentes em celulares diferentes e ninguém entraria na rota.
+  function hashPinSimples(texto) {
+    var a = 0x811c9dc5, b = 0x01000193;
+    for (var i = 0; i < texto.length; i++) {
+      var c = texto.charCodeAt(i);
+      a = (((a ^ c) >>> 0) * 16777619) >>> 0;
+      b = (((b + c) >>> 0) * 2246822519) >>> 0;
+    }
+    return ("00000000" + a.toString(16)).slice(-8) + ("00000000" + b.toString(16)).slice(-8);
+  }
+  function hashPin(pin, salt, alg) {
+    var texto = String(salt) + "|" + String(pin);
+    if (alg === "sha256" && window.crypto && window.crypto.subtle && window.TextEncoder) {
+      return window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(texto))
+        .then(function (buf) {
+          var bytes = new Uint8Array(buf), saida = "";
+          for (var i = 0; i < bytes.length; i++) saida += ("0" + bytes[i].toString(16)).slice(-2);
+          return saida;
+        })
+        .catch(function () { return hashPinSimples(texto); });
+    }
+    return Promise.resolve(hashPinSimples(texto));
+  }
+  function novoTemperoPin() {
+    return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  }
+  function lerPinDaRota(chaveRota) {
+    if (!fbDb) return Promise.resolve(null);
+    return fbDb.ref("lotes/" + chaveRota + "/pin").once("value").then(function (snap) {
+      var v = snap.val();
+      return (v && v.hash && v.salt) ? v : null;
+    });
+  }
+  function gravarPinDaRota(chaveRota, pin) {
+    var alg = algPinDisponivel();
+    var salt = novoTemperoPin();
+    return hashPin(pin, salt, alg).then(function (hash) {
+      var registro = { hash: hash, salt: salt, alg: alg, ts: Date.now() };
+      return fbDb.ref("lotes/" + chaveRota + "/pin").set(registro).then(function () {
+        state.pinRota = registro;
+        return registro;
+      });
+    });
+  }
+  function conferirPin(digitado) {
+    var p = state.pinRota;
+    if (!p) return Promise.resolve(false);
+    return hashPin(digitado, p.salt, p.alg).then(function (h) { return h === p.hash; });
+  }
+
+  // Aparelhos que já destrancaram cada rota — é isso que evita pedir o PIN toda
+  // vez que o app abre. Some ao sair da rota.
+  function rotasDesbloqueadas() { return carregar("rotas-desbloqueadas", {}) || {}; }
+  function marcarRotaDesbloqueada(chaveRota) {
+    var m = rotasDesbloqueadas();
+    m[chaveRota] = true;
+    salvar("rotas-desbloqueadas", m);
+  }
+  function esquecerRotaDesbloqueada(chaveRota) {
+    var m = rotasDesbloqueadas();
+    delete m[chaveRota];
+    salvar("rotas-desbloqueadas", m);
+  }
+
+  function pedirPinNovo(titulo) {
+    var p1 = prompt(titulo + "\n\nEscolha um PIN de 4 dígitos:");
+    if (p1 === null) return null;
+    p1 = String(p1).trim();
+    if (!PIN_FORMATO.test(p1)) { alert("O PIN tem que ser exatamente 4 dígitos (só números)."); return null; }
+    var p2 = prompt("Digite o PIN de novo pra confirmar:");
+    if (p2 === null) return null;
+    if (String(p2).trim() !== p1) { alert("Os dois não bateram. Nada foi alterado."); return null; }
+    return p1;
+  }
+
+  // Usada antes de apagar rua ou foto. Sem rota conectada (ou rota que ainda não
+  // tem PIN), não há nada compartilhado pra proteger e ela deixa passar — é o
+  // modo "só neste aparelho", que sempre funcionou sem tranca nenhuma.
+  function exigirPin(motivo) {
+    if (!fbDb || !state.minhaRota || !state.pinRota) return Promise.resolve(true);
+    var digitado = prompt(motivo + "\n\nPIN de 4 dígitos da rota " + state.minhaRota + ":");
+    if (digitado === null) return Promise.resolve(false);
+    return conferirPin(String(digitado).trim()).then(function (ok) {
+      if (!ok) alert("PIN errado. Nada foi apagado.");
+      return ok;
+    });
+  }
+
+  function aplicarRota(rota) {
     state.minhaRota = rota;
+    state.rotaPendentePin = "";
     salvar("minha-rota", rota);
     conectarRota(rota);
     render();
+  }
+
+  // Entrar numa rota: quem chega primeiro numa rota sem PIN é quem cria o dela
+  // (inclusive nas rotas que já existiam antes desta atualização); os próximos
+  // precisam digitar. Não conectar antes de destrancar é o ponto — é a conexão
+  // que traz lista, fotos e nomes de quem recebeu.
+  function salvarMinhaRota(rota) {
+    if (!fbDb) { aplicarRota(rota); return; }
+    var chaveRota = sanitizarChaveFirebase(rota);
+    state.verificandoPin = true;
+    render();
+    lerPinDaRota(chaveRota).then(function (pin) {
+      state.verificandoPin = false;
+      if (!pin) {
+        var novo = pedirPinNovo("A rota " + rota + " ainda não tem PIN.\n\nEle vai ser pedido pra entrar nela em outros aparelhos e pra apagar rua ou foto. Combine com quem divide a rota.");
+        if (novo === null) { render(); return; }
+        return gravarPinDaRota(chaveRota, novo).then(function () {
+          marcarRotaDesbloqueada(chaveRota);
+          aplicarRota(rota);
+          alert("PIN criado. Anote e passe pra quem divide a rota " + rota + ".");
+        });
+      }
+      state.pinRota = pin;
+      var digitado = prompt("Rota " + rota + "\n\nDigite o PIN de 4 dígitos dela:");
+      if (digitado === null) { state.pinRota = null; render(); return; }
+      return conferirPin(String(digitado).trim()).then(function (ok) {
+        if (!ok) {
+          state.pinRota = null;
+          alert("PIN errado. Não entrei na rota " + rota + ".");
+          render();
+          return;
+        }
+        marcarRotaDesbloqueada(chaveRota);
+        aplicarRota(rota);
+      });
+    }).catch(function () {
+      state.verificandoPin = false;
+      alert("Não consegui conferir o PIN agora (sem internet?). Tente de novo quando o sinal voltar.");
+      render();
+    });
+  }
+
+  // Chamada na abertura do app pra rota que já está salva aqui. Aparelho que já
+  // destrancou essa rota entra direto; o que nunca destrancou (celular novo, ou
+  // a primeira abertura depois desta atualização) passa pelo mesmo caminho de
+  // quem está entrando agora.
+  function retomarRotaSalva() {
+    if (!state.minhaRota) return;
+    var chaveRota = sanitizarChaveFirebase(state.minhaRota);
+    if (!fbDb) { conectarRota(state.minhaRota); return; }
+    if (!rotasDesbloqueadas()[chaveRota]) {
+      // Ainda não destrancada neste aparelho. Sai do "estou na rota" ATÉ o PIN
+      // ser aceito: enquanto minhaRota estiver vazio, nada é escrito na nuvem
+      // dessa rota (todas as gravações conferem esse campo). Sem isso, cancelar
+      // o pedido de PIN deixava o app num meio-termo em que ainda dava pra
+      // apagar rua pra todo mundo. O código fica guardado pra preencher o campo.
+      var pendente = state.minhaRota;
+      state.minhaRota = "";
+      state.rotaPendentePin = pendente;
+      salvarMinhaRota(pendente);
+      return;
+    }
+    lerPinDaRota(chaveRota).then(function (pin) { state.pinRota = pin; }).catch(function () {});
+    conectarRota(state.minhaRota);
+  }
+
+  function alterarPinDaRota() {
+    if (!fbDb || !state.minhaRota) return;
+    var atual = String(state.pinForm.atual || "").trim();
+    var novo = String(state.pinForm.novo || "").trim();
+    if (!PIN_FORMATO.test(novo)) { alert("O PIN novo tem que ser exatamente 4 dígitos (só números)."); return; }
+    var chaveRota = sanitizarChaveFirebase(state.minhaRota);
+    var confere = state.pinRota ? conferirPin(atual) : Promise.resolve(true);
+    confere.then(function (ok) {
+      if (!ok) { alert("O PIN atual está errado. Nada foi alterado."); return; }
+      return gravarPinDaRota(chaveRota, novo).then(function () {
+        state.pinForm = { atual: "", novo: "" };
+        marcarRotaDesbloqueada(chaveRota);
+        render();
+        alert("PIN da rota " + state.minhaRota + " alterado.\n\nAvise quem divide a rota: os aparelhos deles vão pedir o novo quando entrarem de novo.");
+      });
+    }).catch(function () {
+      alert("Não consegui alterar o PIN agora (sem internet?). Tente de novo quando o sinal voltar.");
+    });
   }
 
   // Sair da rota: desliga a sincronização e devolve este aparelho pro modo
@@ -2106,6 +2327,11 @@
     }
     if (!confirm(aviso)) return;
     desconectarRota();
+    // Esquece que este aparelho já tinha destrancado a rota: entrar de novo
+    // volta a pedir o PIN, senão a tranca não valeria nada depois do primeiro uso.
+    esquecerRotaDesbloqueada(sanitizarChaveFirebase(state.minhaRota));
+    state.pinRota = null;
+    state.pinForm = { atual: "", novo: "" };
     state.minhaRota = "";
     state.rotaConectada = false;
     salvar("minha-rota", "");
@@ -3994,6 +4220,8 @@
     var conectadoAgora = state.rotaConectada && state.conexaoViva !== false;
     var statusTexto = !fbDb
       ? "sem conex\u00e3o com o Firebase \u2014 tudo funciona s\u00f3 neste aparelho."
+      : (!state.minhaRota && state.rotaPendentePin)
+      ? "falta o PIN da rota " + state.rotaPendentePin + " \u2014 toque em Salvar e digite pra entrar nela."
       : !state.minhaRota
       ? "defina seu c\u00f3digo pra compartilhar o progresso com quem mais estiver nessa rota."
       : conectadoAgora
@@ -4006,7 +4234,7 @@
     var html = '<div class="card" style="padding:12px;margin-bottom:16px">' +
       '<p style="font-size:11px;font-weight:600;margin:0 0 6px;opacity:.65">C\u00d3DIGO DA SUA ROTA</p>' +
       '<div style="display:flex;gap:8px">' +
-      '<input id="minhaRotaInput" value="' + esc(state.minhaRota) + '" placeholder="ex: RJ B301-00 088" style="flex:1;min-width:0;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" />' +
+      '<input id="minhaRotaInput" value="' + esc(state.minhaRota || state.rotaPendentePin) + '" placeholder="ex: RJ B301-00 088" style="flex:1;min-width:0;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" />' +
       '<button data-action="salvar-rota" style="padding:8px 14px;border-radius:8px;background:var(--ink);color:var(--paper-light);border:none;font-weight:600">Salvar</button>' +
       "</div>" +
       '<p style="font-size:11px;margin:8px 0 0;color:' + statusCor + '">' + statusTexto + "</p>" +
@@ -4019,6 +4247,22 @@
         : state.mapaRuas.length === 0
         ? "assim que cadastrar uma rua abaixo, ela j\u00e1 sobe pra nuvem sozinha"
         : "\u2713 Faixas com c\u00f3pia de seguran\u00e7a na nuvem") + "</p>" +
+      (state.verificandoPin ? '<p style="font-size:11px;margin:6px 0 0;opacity:.7">conferindo o PIN da rota...</p>' : "") +
+      // Trocar o PIN fica junto do c\u00f3digo da rota de prop\u00f3sito: \u00e9 a mesma
+      // ideia (o que identifica e o que destranca a rota), e quem procura um
+      // procura o outro.
+      (fbDb && state.minhaRota
+        ? '<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">' +
+          '<p style="font-size:11px;font-weight:600;margin:0 0 2px;opacity:.65">PIN DA ROTA</p>' +
+          '<p style="font-size:11px;margin:0 0 8px;opacity:.55">Pedido pra entrar nesta rota em outro aparelho e pra apagar rua ou foto. Trocar vale pra todo mundo da rota ' + esc(state.minhaRota) + '.</p>' +
+          '<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">' +
+          '<div style="flex:1;min-width:92px"><span style="font-size:11px;opacity:.65">PIN atual</span><br>' +
+          '<input id="pinAtual" data-action="pin-atual" type="password" inputmode="numeric" maxlength="4" autocomplete="off" value="' + esc(state.pinForm.atual) + '" placeholder="\u2022\u2022\u2022\u2022" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
+          '<div style="flex:1;min-width:92px"><span style="font-size:11px;opacity:.65">PIN novo</span><br>' +
+          '<input id="pinNovo" data-action="pin-novo" type="password" inputmode="numeric" maxlength="4" autocomplete="off" value="' + esc(state.pinForm.novo) + '" placeholder="\u2022\u2022\u2022\u2022" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
+          '<button data-action="alterar-pin" class="pill" style="padding:9px 14px">Alterar PIN</button>' +
+          "</div></div>"
+        : "") +
       (state.minhaRota
         ? '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">' +
           (fbDb ? '<button data-action="restaurar-faixas-nuvem" class="pill"' + (state.restaurandoFaixas ? " disabled" : "") + '>' + (state.restaurandoFaixas ? "Buscando..." : "\u2601 Restaurar da nuvem") + "</button>" : "") +
@@ -4247,6 +4491,15 @@
     };
     var sairRotaBtn = app.querySelector('[data-action="sair-rota"]');
     if (sairRotaBtn) sairRotaBtn.onclick = sairDaRota;
+    // Os dois campos do PIN guardam no state a cada tecla, igual aos outros
+    // campos da tela: sem isso, qualquer novidade da nuvem refaz a tela e o que
+    // estava digitado se perde no meio.
+    var pinAtualEl = document.getElementById("pinAtual");
+    if (pinAtualEl) pinAtualEl.oninput = function () { state.pinForm.atual = pinAtualEl.value; };
+    var pinNovoEl = document.getElementById("pinNovo");
+    if (pinNovoEl) pinNovoEl.oninput = function () { state.pinForm.novo = pinNovoEl.value; };
+    var alterarPinBtn = app.querySelector('[data-action="alterar-pin"]');
+    if (alterarPinBtn) alterarPinBtn.onclick = alterarPinDaRota;
     var restaurarFaixasBtn = app.querySelector('[data-action="restaurar-faixas-nuvem"]');
     if (restaurarFaixasBtn) restaurarFaixasBtn.onclick = restaurarDaNuvem;
     app.querySelectorAll('[data-action="del-rua"]').forEach(function (el) {
@@ -4284,7 +4537,7 @@
     if (syncIniciada || !fbDb) return;
     syncIniciada = true;
     ouvirContadores();
-    if (state.minhaRota) conectarRota(state.minhaRota);
+    retomarRotaSalva();
     if (state.filaPendente.length > 0) tentarReenviarFila();
   }
   function entrarAnonimo() {
