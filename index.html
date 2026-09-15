@@ -1618,6 +1618,15 @@
   try { localStorage.removeItem("lens-capturas"); } catch (e) { /* ignora */ }
   state.contadorGlobal = carregar("contador-pacotes-total", 0);
   state.minhaRota = carregar("minha-rota", "");
+  // Rota salva aqui mas com o destrave vencido (ou nunca destrancada neste
+  // aparelho) já começa FORA da rota, antes de qualquer outra coisa rodar. Sem
+  // isso o app passaria os primeiros instantes se achando dentro dela — e se o
+  // login demorasse ou falhasse, ficaria assim, com as gravações da nuvem
+  // liberadas sem ninguém ter digitado o PIN.
+  if (fbDb && state.minhaRota && !rotaDestrancadaAgora(sanitizarChaveFirebase(state.minhaRota))) {
+    state.rotaPendentePin = state.minhaRota;
+    state.minhaRota = "";
+  }
   state.filaPendente = carregar("fila-fotos-pendentes", []);
   state.bipeAtivo = carregar("bipe-ativo", true);
   focoAncora = carregar("foco-ancora", null);
@@ -2159,12 +2168,25 @@
   function novoTemperoPin() {
     return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
   }
+  // Prazo pra nuvem responder com o PIN da rota. Existe porque, sem internet, a
+  // leitura do Firebase não FALHA — ela fica pendurada esperando conexão. Sem
+  // esse prazo o app ficaria parado em "conferindo o PIN da rota..." pra
+  // sempre, sem dizer nada a ninguém.
+  var ESPERA_PIN_MS = 10000;
   function lerPinDaRota(chaveRota) {
     if (!fbDb) return Promise.resolve(null);
-    return fbDb.ref("lotes/" + chaveRota + "/pin").once("value").then(function (snap) {
+    var leitura = fbDb.ref("lotes/" + chaveRota + "/pin").once("value").then(function (snap) {
       var v = snap.val();
       return (v && v.hash && v.salt) ? v : null;
     });
+    var prazo = new Promise(function (_, rejeitar) {
+      setTimeout(function () {
+        var e = new Error("a nuvem não respondeu a tempo");
+        e.semResposta = true;
+        rejeitar(e);
+      }, ESPERA_PIN_MS);
+    });
+    return Promise.race([leitura, prazo]);
   }
   function gravarPinDaRota(chaveRota, pin) {
     var alg = algPinDisponivel();
@@ -2183,12 +2205,40 @@
     return hashPin(digitado, p.salt, p.alg).then(function (h) { return h === p.hash; });
   }
 
-  // Aparelhos que já destrancaram cada rota — é isso que evita pedir o PIN toda
-  // vez que o app abre. Some ao sair da rota.
+  // Quando cada aparelho destrancou cada rota (o instante, não um "sim").
+  //
+  // Essa marca é o que evita pedir o PIN a cada abertura — mas ela VENCE em
+  // 24h. Antes valia pra sempre, e isso tinha um efeito que passava
+  // despercebido: trocar o PIN não expulsava ninguém. Quem já tinha digitado o
+  // PIN uma vez naquele celular nunca mais era perguntado, então o celular de
+  // um ajudante que saiu da equipe continuava entrando na rota pra sempre, e
+  // não havia como cortar. Vencendo em 24h, a troca de PIN passa a valer de
+  // verdade: no dia seguinte o aparelho pergunta de novo, e quem não souber o
+  // número novo fica de fora.
+  //
+  // De propósito NÃO é o PIN que vence, é esta marca. Se o PIN vencesse, todo
+  // dia a rota voltaria a ficar sem PIN nenhum — e quem abrisse o app primeiro
+  // criaria o do dia, inclusive alguém de fora, que aí trancaria a equipe pra
+  // fora da própria rota.
   function rotasDesbloqueadas() { return carregar("rotas-desbloqueadas", {}) || {}; }
+  function rotaDestrancadaAgora(chaveRota) {
+    // As 24h ficam escritas aqui dentro, e não numa constante lá em cima, de
+    // propósito: esta função é chamada na PARTIDA do app, antes de as variáveis
+    // desta parte do arquivo receberem valor. Com uma constante, ela chegaria
+    // valendo "undefined" na comparação — e aí todo destrave dava como vencido,
+    // pedindo o PIN a cada abertura. Foi exatamente isso que aconteceu.
+    var validadeMs = 24 * 60 * 60 * 1000;
+    var quando = rotasDesbloqueadas()[chaveRota];
+    // Formato antigo (true, de antes desta mudança) cai aqui e conta como
+    // vencido: pede o PIN uma vez depois da atualização e volta ao normal.
+    if (typeof quando !== "number") return false;
+    var passou = Date.now() - quando;
+    // Negativo = relógio do celular andou pra trás. Na dúvida, pede de novo.
+    return passou >= 0 && passou < validadeMs;
+  }
   function marcarRotaDesbloqueada(chaveRota) {
     var m = rotasDesbloqueadas();
-    m[chaveRota] = true;
+    m[chaveRota] = Date.now();
     salvar("rotas-desbloqueadas", m);
   }
   function esquecerRotaDesbloqueada(chaveRota) {
@@ -2264,7 +2314,11 @@
       });
     }).catch(function () {
       state.verificandoPin = false;
-      alert("Não consegui conferir o PIN agora (sem internet?). Tente de novo quando o sinal voltar.");
+      // Sem internet não dá pra conferir o PIN, e sem conferir não entra — foi
+      // uma escolha consciente: melhor barrar do que deixar entrar sem saber.
+      // Quem estiver sem sinal resolve com o celular de um colega roteando a
+      // internet.
+      alert("Sem internet agora.\n\nO PIN da rota é conferido na nuvem, então não dá pra entrar até o sinal voltar. Se precisar começar já, peça pra um colega compartilhar a internet do celular dele.");
       render();
     });
   }
@@ -2273,22 +2327,28 @@
   // destrancou essa rota entra direto; o que nunca destrancou (celular novo, ou
   // a primeira abertura depois desta atualização) passa pelo mesmo caminho de
   // quem está entrando agora.
+  // Tira o aparelho de dentro da rota até o PIN ser digitado de novo. Enquanto
+  // minhaRota estiver vazio nada é escrito na nuvem daquela rota (toda gravação
+  // confere esse campo), então isso vale tanto pro destrave vencido quanto pra
+  // quem cancelou o pedido de PIN. O código fica guardado só pra preencher o
+  // campo na tela.
+  function exigirDestraveDaRota() {
+    if (!state.minhaRota) return "";
+    var pendente = state.minhaRota;
+    desconectarRota();
+    state.minhaRota = "";
+    state.rotaPendentePin = pendente;
+    state.pinRota = null;
+    state.rotaConectada = false;
+    return pendente;
+  }
+
   function retomarRotaSalva() {
-    if (!state.minhaRota) return;
+    var rota = state.minhaRota || state.rotaPendentePin;
+    if (!rota) return;
+    if (!fbDb) { state.minhaRota = rota; state.rotaPendentePin = ""; conectarRota(rota); return; }
+    if (!state.minhaRota) { salvarMinhaRota(rota); return; }
     var chaveRota = sanitizarChaveFirebase(state.minhaRota);
-    if (!fbDb) { conectarRota(state.minhaRota); return; }
-    if (!rotasDesbloqueadas()[chaveRota]) {
-      // Ainda não destrancada neste aparelho. Sai do "estou na rota" ATÉ o PIN
-      // ser aceito: enquanto minhaRota estiver vazio, nada é escrito na nuvem
-      // dessa rota (todas as gravações conferem esse campo). Sem isso, cancelar
-      // o pedido de PIN deixava o app num meio-termo em que ainda dava pra
-      // apagar rua pra todo mundo. O código fica guardado pra preencher o campo.
-      var pendente = state.minhaRota;
-      state.minhaRota = "";
-      state.rotaPendentePin = pendente;
-      salvarMinhaRota(pendente);
-      return;
-    }
     lerPinDaRota(chaveRota).then(function (pin) { state.pinRota = pin; }).catch(function () {});
     conectarRota(state.minhaRota);
   }
@@ -2804,7 +2864,19 @@
       if (state.loteFoto) state.loteFoto.statusCamera = "idle";
       render();
     }
-    if (!document.hidden) tentarReenviarFila();
+    if (!document.hidden) {
+      tentarReenviarFila();
+      // O app instalado costuma passar a noite aberto no bolso, então a
+      // checagem não pode ser só na abertura — senão o destrave nunca venceria
+      // pra quem não fecha o app. Não interrompe quem está com a câmera aberta
+      // no meio de fotografar um pacote: nesse caso espera a próxima volta.
+      if (fbDb && state.minhaRota && !state.loteFoto &&
+          !rotaDestrancadaAgora(sanitizarChaveFirebase(state.minhaRota))) {
+        var rotaVencida = exigirDestraveDaRota();
+        render();
+        if (rotaVencida) salvarMinhaRota(rotaVencida);
+      }
+    }
   });
 
   window.addEventListener("online", function () {
@@ -4254,7 +4326,7 @@
       (fbDb && state.minhaRota
         ? '<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">' +
           '<p style="font-size:11px;font-weight:600;margin:0 0 2px;opacity:.65">PIN DA ROTA</p>' +
-          '<p style="font-size:11px;margin:0 0 8px;opacity:.55">Pedido pra entrar nesta rota em outro aparelho e pra apagar rua ou foto. Trocar vale pra todo mundo da rota ' + esc(state.minhaRota) + '.</p>' +
+          '<p style="font-size:11px;margin:0 0 8px;opacity:.55">Cada aparelho pede o PIN uma vez por dia, e sempre que for apagar rua ou foto. Trocar vale pra todo mundo da rota ' + esc(state.minhaRota) + ' — os celulares que já estão dentro vão pedir o número novo no dia seguinte.</p>' +
           '<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">' +
           '<div style="flex:1;min-width:92px"><span style="font-size:11px;opacity:.65">PIN atual</span><br>' +
           '<input id="pinAtual" data-action="pin-atual" type="password" inputmode="numeric" maxlength="4" autocomplete="off" value="' + esc(state.pinForm.atual) + '" placeholder="\u2022\u2022\u2022\u2022" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
