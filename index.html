@@ -402,6 +402,43 @@
     return Promise.resolve();
   }
 
+  // Quantas recusas seguidas até parar de insistir sozinho numa foto. Falta de
+  // sinal NUNCA conta (ver contarFalhaDeEnvio): ficar offline é o dia a dia da
+  // rua, e nesse caso a foto espera o quanto for preciso.
+  var MAX_TENTATIVAS_FILA = 5;
+  function contarFalhaDeEnvio(item, err) {
+    if (err && err.semConexao) return;
+    item.tentativas = (item.tentativas || 0) + 1;
+    if (item.tentativas >= MAX_TENTATIVAS_FILA) item.travado = true;
+    salvarFila();
+  }
+  function fotosTravadas() {
+    return state.filaPendente.filter(function (p) { return p.travado; });
+  }
+  // Descartar foto pendente é jogar fora comprovante de entrega, então isso
+  // nunca acontece sozinho — só por aqui, com a lista do que vai sumir na
+  // frente e uma confirmação. Existe porque a alternativa é pior: uma foto que
+  // o servidor recusa pra sempre deixava o contador de pendentes travado e o
+  // alerta antes do zip aparecendo todo dia, até a pessoa parar de ler o
+  // alerta — e aí um pendente de verdade passaria batido também.
+  function descartarFotosTravadas() {
+    var travadas = fotosTravadas();
+    if (!travadas.length) return;
+    var lista = travadas.slice(0, 6).map(function (p) {
+      var oque = p.tipo === "fachada" ? "fachada" : "pacote " + (p.codigo || "");
+      return "· " + oque + " — " + (p.rua || "") + (p.numero ? ", nº " + p.numero : "");
+    }).join("\n");
+    var ok = confirm(
+      "Descartar " + travadas.length + " " + plural(travadas.length, "foto que não conseguiu subir", "fotos que não conseguiram subir") + "?\n\n" +
+      lista + (travadas.length > 6 ? "\n· ..." : "") + "\n\n" +
+      "Elas somem deste aparelho e não entram em zip nenhum. Se eram o comprovante da entrega, vai ter que resolver por fora.\n\nDescartar mesmo?"
+    );
+    if (!ok) return;
+    state.filaPendente = state.filaPendente.filter(function (p) { return !p.travado; });
+    salvarFila();
+    render();
+  }
+
   // Guarda a foto na fila de reenvio. Extraído porque agora TODA falha cai
   // aqui — não só falta de conexão.
   function guardarNaFila(item, blob) {
@@ -442,6 +479,7 @@
       if (err && err.respostaInvalida) {
         state.avisoEnvio = "O Cloudinary recusou o envio agora (" + (err.message || "") .slice(0, 80) + "). A foto está guardada e vai ser reenviada — dá pra forçar no botão de pendentes.";
       }
+      contarFalhaDeEnvio(item, err);
       render();
     });
   }
@@ -449,11 +487,20 @@
   // Reenvia a fila pendente, um item de cada vez (mais confiável numa conexão
   // fraca do que mandar tudo junto). Chamada quando a conexão volta, quando o
   // app volta a ficar visível, no carregamento, e pelo botão manual.
-  function tentarReenviarFila() {
+  function tentarReenviarFila(forcado) {
     if (state.enviandoFila || !cloudinaryPronto || !fbDb) return;
-    if (!state.filaPendente.length) return;
+    if (forcado) {
+      // Pedido explícito da pessoa no botão: dá uma chance nova até pras que já
+      // tinham sido marcadas como travadas.
+      state.filaPendente.forEach(function (p) { p.travado = false; p.tentativas = 0; });
+    }
+    // Foto travada fica de fora do reenvio automático. Ela já foi recusada
+    // várias vezes por algo que não é falta de sinal, então tentar de novo a
+    // cada abertura do app só gasta dado e segura a fila atrás dela. Continua
+    // guardada e aparece na aba Hoje pra pessoa decidir o que fazer.
+    var pendentes = state.filaPendente.filter(function (p) { return !p.travado; });
+    if (!pendentes.length) return;
     state.enviandoFila = true;
-    var pendentes = state.filaPendente.slice();
 
     function processarProximo(i) {
       if (i >= pendentes.length) {
@@ -472,8 +519,15 @@
       }).then(function () {
         state.filaPendente = state.filaPendente.filter(function (p) { return p.id !== item.id; });
         salvarFila();
-      }).catch(function () {
-        // ainda sem conexão (ou erro passageiro) — deixa na fila, tenta o próximo
+      }).catch(function (err) {
+        // Deixa na fila e tenta o próximo. Mas CONTA a tentativa quando a falha
+        // não é falta de sinal: sem sinal é o caso normal e a foto tem que
+        // esperar o tempo que for preciso, enquanto recusa de verdade do
+        // servidor (limite da conta estourado, preset apagado) ou dado
+        // corrompido nunca vai passar por mais que se insista. Era isso que
+        // fazia o aviso de pendentes nunca zerar e o alerta antes do zip
+        // aparecer todo santo dia até ninguém mais ler.
+        contarFalhaDeEnvio(item, err);
       }).then(function () {
         render();
         processarProximo(i + 1);
@@ -3820,6 +3874,17 @@
         "</button>";
     }
 
+    var travadas = fotosTravadas();
+    if (travadas.length) {
+      html += '<div class="warn-box" style="margin-bottom:12px">' +
+        '<p style="margin:0 0 6px;font-weight:700">' + travadas.length + " " +
+          plural(travadas.length, "foto não está conseguindo subir", "fotos não estão conseguindo subir") + "</p>" +
+        '<p style="margin:0 0 10px;font-size:12px;line-height:1.45">Já tentei várias vezes e o servidor de fotos recusou — isso não é falta de sinal. ' +
+          'O botão de pendentes aí em cima tenta de novo. Enquanto elas ficarem aqui, o aviso de pendentes não zera e o zip sai sem elas.</p>' +
+        '<button data-action="descartar-travadas" class="btn-primary" style="background:var(--alert);color:#fff">🗑️ Descartar essas ' +
+          plural(travadas.length, "foto", "fotos") + "</button></div>";
+    }
+
     if (cloudinaryPronto && state.minhaRota) {
       html += '<button data-action="baixar-zip" class="btn-primary" style="margin-bottom:12px"' + (state.baixandoZip ? " disabled" : "") + ">" +
         (state.baixandoZip && !state.baixandoZipChave ? "Preparando o zip..." : "\u{1F4E5} Baixar fotos de hoje (zip, em ordem)") + "</button>";
@@ -4103,8 +4168,11 @@
     app.querySelectorAll('[data-action="baixar-endereco"]').forEach(function (el) {
       el.onclick = function () { baixarFotosDoEndereco(el.getAttribute("data-chave")); };
     });
+    // "true" = pedido explícito: reenvia inclusive as que estavam travadas.
     var reenviarBtn = app.querySelector('[data-action="reenviar-pendentes"]');
-    if (reenviarBtn) reenviarBtn.onclick = tentarReenviarFila;
+    if (reenviarBtn) reenviarBtn.onclick = function () { tentarReenviarFila(true); };
+    var descartarTravadasBtn = app.querySelector('[data-action="descartar-travadas"]');
+    if (descartarTravadasBtn) descartarTravadasBtn.onclick = descartarFotosTravadas;
 
     var novoNomeEl = document.getElementById("novoNomeRua");
     if (novoNomeEl) novoNomeEl.oninput = function () { state.novoNomeRua = novoNomeEl.value; };
