@@ -458,13 +458,23 @@
 
   // Guarda a foto na fila de reenvio. Extraído porque agora TODA falha cai
   // aqui — não só falta de conexão.
+  //
+  // O item entra na fila AGORA, no mesmo instante, e a conversão pra base64
+  // (que demora) só preenche a foto depois. Antes ele só entrava quando a
+  // conversão terminava, e nesse vão proximoSlotPacote ainda não enxergava
+  // essa foto: mandar um lote e emendar um "+📷" no mesmo pacote logo em
+  // seguida calculava o MESMO slot pras duas, e quando as duas chegassem no
+  // Firebase uma sobrescrevia a outra — uma foto de entrega perdida, sem
+  // nenhum sinal de que tinha acontecido.
   function guardarNaFila(item, blob) {
+    removerDaFilaPorIdentidade(item);
+    item.id = idFila();
+    item.criadoEm = Date.now();
+    state.filaPendente.push(item);
     return blobParaBase64(blob).then(function (base64) {
-      removerDaFilaPorIdentidade(item);
-      item.id = idFila();
       item.blobBase64 = base64;
-      item.criadoEm = Date.now();
-      state.filaPendente.push(item);
+      // Só grava depois que a foto está junto: item sem foto no armazenamento
+      // não serviria pra nada se o app fechasse agora.
       salvarFila();
       render();
     });
@@ -526,7 +536,11 @@
     // várias vezes por algo que não é falta de sinal, então tentar de novo a
     // cada abertura do app só gasta dado e segura a fila atrás dela. Continua
     // guardada e aparece na aba Hoje pra pessoa decidir o que fazer.
-    var pendentes = state.filaPendente.filter(function (p) { return !p.travado; });
+    // "blobBase64" ainda vazio = foto que acabou de entrar na fila e ainda está
+    // sendo convertida (ver guardarNaFila). Tentar mandar agora falharia por
+    // falta de foto e ainda queimaria uma tentativa dela à toa — ela entra no
+    // próximo reenvio, já pronta.
+    var pendentes = state.filaPendente.filter(function (p) { return !p.travado && p.blobBase64; });
     if (!pendentes.length) return;
     state.enviandoFila = true;
 
@@ -3694,7 +3708,11 @@
 
     var registros = finais.map(function (p) {
       var r = impjExtrairRegistro(p);
-      r.codigo = p.waybillNo;
+      // Sempre texto. Um registro sem waybillNo deixava r.codigo indefinido, e
+      // mais abaixo o agrupamento por peça chamava .split("-") nele — erro não
+      // capturado que matava o import INTEIRO, sem mensagem nenhuma na tela: a
+      // pessoa colava o JSON e simplesmente não acontecia nada.
+      r.codigo = (p.waybillNo == null ? "" : String(p.waybillNo)).trim();
       r.abnormal = !!p.isAbnormal;
       return r;
     });
@@ -3783,12 +3801,20 @@
       if (r.complemento) notas.push(r.complemento);
       if (r.foraDaFaixa) notas.push("conferir número — fora da faixa cadastrada");
       if (r.cepDivergente) notas.push("conferir CEP — veio " + formatarCep(r.cep) + ", essa rua costuma ser " + formatarCep(r.cepEsperado));
+      // O pacote continua na lista mesmo sem código — dá pra separar na mão e
+      // ver que ele existe. Some o que NÃO dá: bipar (o código é o que a câmera
+      // procura) e fotografar (o código é o nome da foto no Firebase e dentro
+      // do zip). Melhor dizer isso do que o pacote sumir calado.
+      if (!r.codigo) notas.push("SEM CÓDIGO — não dá pra bipar nem fotografar");
       if (notas.length) nome += " (" + notas.join(" · ") + ")";
       return r.rua + ", " + r.numero + ", " + nome + ", " + r.codigo;
     }).join("\n");
 
     var porBaseFinal = {};
     completos.forEach(function (r) {
+      // Sem código não entra no agrupamento por peça: juntaria todos os
+      // sem-código numa "encomenda de várias peças" que não existe.
+      if (!r.codigo) return;
       var b = r.codigo.split("-")[0];
       (porBaseFinal[b] = porBaseFinal[b] || []).push(r);
     });
@@ -3800,6 +3826,7 @@
       falhas: falhas, gruposMultiPeca: gruposMultiPeca,
       abnormais: completos.filter(function (r) { return r.abnormal; }),
       semNumero: completos.filter(function (r) { return r.semNumero; }),
+      semCodigo: completos.filter(function (r) { return !r.codigo; }),
       corrigidosPorFaixa: completos.filter(function (r) { return r.metodo.indexOf("+corrigido-faixa") !== -1; }),
       foraDaFaixa: completos.filter(function (r) { return r.foraDaFaixa; }),
       cepDivergente: completos.filter(function (r) { return r.cepDivergente; })
@@ -3853,6 +3880,10 @@
     if (r.semNumero.length) {
       avisos.push(r.semNumero.length + " pacote(s) sem número identificado — entraram na lista mesmo assim, na caixa \"SEM Nº\" da rua certa: " +
         r.semNumero.map(function (f) { return f.nome + " (" + f.rua + ")"; }).join(" · "));
+    }
+    if (r.semCodigo.length) {
+      avisos.push("ATENÇÃO: " + r.semCodigo.length + " pacote(s) vieram do JSON sem o código de rastreio. Estão na lista e dá pra separar na mão, mas NÃO dá pra bipar nem fotografar (o código é o que identifica a foto na baixa): " +
+        r.semCodigo.map(function (f) { return f.nome + " (" + f.rua + " " + f.numero + ")"; }).join(" · "));
     }
     if (r.corrigidosPorFaixa.length) {
       avisos.push(r.corrigidosPorFaixa.length + " número(s) vieram com complemento colado na frente e foram corrigidos com base na faixa cadastrada: " +
