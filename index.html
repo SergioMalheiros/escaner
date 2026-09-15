@@ -1192,7 +1192,36 @@
     });
   }
   function plural(n, s, p) { return n === 1 ? s : p; }
-  function esc(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
+  // Escapa pra ir dentro do HTML — inclusive DENTRO DE ATRIBUTO.
+  //
+  // A versão anterior fazia isso jogando o texto num elemento e lendo o
+  // innerHTML de volta. Só que esse caminho escapa "<", ">" e "&", e NÃO escapa
+  // aspas: como a tela inteira é montada concatenando texto (atributo="' + esc(x) + '"),
+  // um valor com aspa fechava o atributo antes da hora e o que viesse depois
+  // era lido como atributo novo. Na prática dava os dois problemas de uma vez:
+  //   - um nome de quem recebeu com aspas (Porteiro "João") quebrava a caixa e
+  //     o botão daquele endereço parava de funcionar, sem explicação nenhuma;
+  //   - e dava pra injetar um atributo executável (onfocus, onerror) — como
+  //     esses campos vêm do Firebase, que é compartilhado por código de rota,
+  //     isso rodaria no celular de todo mundo da rota.
+  // Por isso agora é escape explícito, com aspas incluídas. O "&" tem que ser o
+  // primeiro, senão ele re-escaparia os "&" dos próprios códigos abaixo.
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+  // Cor que vai direto pra dentro de um style= na tela. As Faixas (e com elas
+  // as cores) são compartilhadas pela rota e vêm do Firebase, então não dá pra
+  // tratar como confiável: aqui só passa hexadecimal de verdade. Qualquer outra
+  // coisa vira o cinza neutro, em vez de entrar crua no HTML e poder emendar
+  // outras regras de estilo no meio.
+  function corSegura(c) {
+    return /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(String(c == null ? "" : c)) ? String(c) : COR_SEM_FAIXA;
+  }
   function formatarNumero(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, "."); }
 
   // ---------- estado ----------
@@ -2694,7 +2723,9 @@
     // mostra as duas empilhadas, com rolagem se precisar — "Apagar" some
     // com todas de uma vez (ver comentário em apagarFotoPacote).
     var imgs = urls.map(function (u) {
-      return '<img src="' + u + '" style="max-width:100%;max-height:' + (urls.length > 1 ? "38vh" : "70vh") + ';border-radius:8px;object-fit:contain" />';
+      // A URL vem do Firebase, então passa por esc igual a qualquer outro dado
+      // de fora — sem isso, uma URL com aspas fechava o atributo e virava HTML.
+      return '<img src="' + esc(u) + '" style="max-width:100%;max-height:' + (urls.length > 1 ? "38vh" : "70vh") + ';border-radius:8px;object-fit:contain" />';
     }).join("");
     return '<div style="position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:1000;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;gap:14px">' +
       '<div style="display:flex;flex-direction:column;gap:10px;max-height:78vh;overflow-y:auto;align-items:center">' + imgs + '</div>' +
@@ -2954,7 +2985,7 @@
     if (!state.flashScan) return "";
     var f = state.flashScan;
     var corTexto = corTextoParaHex(f.cor);
-    return '<div style="position:fixed;inset:0;background:' + f.cor + ';z-index:1200;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;pointer-events:none">' +
+    return '<div style="position:fixed;inset:0;background:' + corSegura(f.cor) + ';z-index:1200;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;pointer-events:none">' +
       '<p style="font-size:60px;font-weight:800;margin:0;color:' + corTexto + '">' + f.label + '</p>' +
       '<p style="font-size:20px;font-weight:600;margin:0;color:' + corTexto + ';opacity:.9">' + esc(f.rua) + ' · nº ' + esc(f.numero) + '</p>' +
       "</div>";
@@ -3068,7 +3099,7 @@
       // (topo) e do <ul> (base) em vez de recortar a caixa inteira.
       html += '<div class="card" id="' + idGrupo + '" style="margin-bottom:12px">' +
         '<div style="position:sticky;top:0;z-index:5;overflow:hidden;border-radius:9px 9px 0 0">' +
-        '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:' + g.cor + '">' +
+        '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:' + corSegura(g.cor) + '">' +
         '<span style="font-size:14px;font-weight:700;flex:1;color:' + corTextoParaHex(g.cor) + '">' + g.label + " \u00b7 " + esc(g.ruaNome) + "</span>" +
         '<span style="font-size:11px;font-family:ui-monospace,monospace;color:' + corTextoParaHex(g.cor) + ';opacity:.85">' + separadosNaCaixa + "/" + g.total + "</span></div>";
 
@@ -3159,15 +3190,15 @@
           // "+" abre a c\u00e2mera s\u00f3 pra somar uma foto a mais (ex: esqueceu a
           // frente da loja e s\u00f3 foi lembrar depois de j\u00e1 ter ido embora) \u2014
           // sem precisar apagar e pedir o pacote de volta pra pessoa.
-          botaoFoto = '<button data-action="ver-foto-pacote" data-id="' + item.id + '" class="pill ativo-entregue">\u2713 Foto' + (qtdFotosPacote > 1 ? " (" + qtdFotosPacote + ")" : "") + '</button>' +
-            '<button data-action="foto-extra-pacote" data-id="' + item.id + '" class="pill" title="Adicionar mais uma foto a esse pacote">+ \ud83d\udcf7</button>' +
-            '<button data-action="apagar-foto-pacote" data-id="' + item.id + '" class="pill" style="background:var(--alert);color:#fff">\ud83d\uddd1\ufe0f</button>';
+          botaoFoto = '<button data-action="ver-foto-pacote" data-id="' + esc(item.id) + '" class="pill ativo-entregue">\u2713 Foto' + (qtdFotosPacote > 1 ? " (" + qtdFotosPacote + ")" : "") + '</button>' +
+            '<button data-action="foto-extra-pacote" data-id="' + esc(item.id) + '" class="pill" title="Adicionar mais uma foto a esse pacote">+ \ud83d\udcf7</button>' +
+            '<button data-action="apagar-foto-pacote" data-id="' + esc(item.id) + '" class="pill" style="background:var(--alert);color:#fff">\ud83d\uddd1\ufe0f</button>';
         } else {
-          botaoFoto = '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" data-id="' + item.id + '" class="pill' + (fotoPacotePendente ? " ativo-pendente" : "") + '">' +
+          botaoFoto = '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" data-id="' + esc(item.id) + '" class="pill' + (fotoPacotePendente ? " ativo-pendente" : "") + '">' +
             (fotoPacotePendente ? "\u23f3" : "\u{1F4F7}") + " Foto</button>";
         }
-        html += '<li id="pacote-' + item.id + '" style="padding:' + recuo + ';border-top:1px solid var(--line)">' +
-          '<div data-action="toggle-separado" data-id="' + item.id + '" style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer;margin-bottom:8px">' +
+        html += '<li id="pacote-' + esc(item.id) + '" style="padding:' + recuo + ';border-top:1px solid var(--line)">' +
+          '<div data-action="toggle-separado" data-id="' + esc(item.id) + '" style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer;margin-bottom:8px">' +
           '<span class="checkbox' + (st.separado ? " done" : "") + '">' + (st.separado ? "\u2713" : "") + "</span>" +
           '<span' + (st.separado ? ' class="nome-separado"' : "") + ">" + (qtdMesmoNumero > 1 ? esc(item.nome || "sem nome") : "n\u00ba " + esc(item.numero) + (item.nome ? " \u00b7 " + esc(item.nome) : "")) + "</span></div>" +
           '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
@@ -3177,7 +3208,7 @@
           // número inteiro — por isso o campo fica aqui, colado no nome do
           // pacote, e grava só nele.
           (lojaPorLojaAtual
-            ? '<input data-action="quem-recebeu" data-id="' + item.id + '" value="' + esc((state.entregaInfo[item.id] && state.entregaInfo[item.id].quemRecebeu) || "") + '" placeholder="Quem recebeu ' + (item.nome ? "em " + esc(cortarNome(String(item.nome).trim(), 18)) : "esse pacote") + '" style="width:100%;box-sizing:border-box;margin-top:8px;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light)" />'
+            ? '<input data-action="quem-recebeu" data-id="' + esc(item.id) + '" value="' + esc((state.entregaInfo[item.id] && state.entregaInfo[item.id].quemRecebeu) || "") + '" placeholder="Quem recebeu ' + (item.nome ? "em " + esc(cortarNome(String(item.nome).trim(), 18)) : "esse pacote") + '" style="width:100%;box-sizing:border-box;margin-top:8px;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light)" />'
             : "") +
           "</li>";
       });
@@ -3793,11 +3824,11 @@
       html += '<div class="card" style="overflow:hidden;margin-bottom:14px">' +
         '<div style="display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--paper-deep)">' +
         '<span style="flex:1;font-size:14px;font-weight:600">' + esc(r.nome) + "</span>" +
-        '<button data-action="del-rua" data-id="' + r.id + '" style="border:none;background:none;color:var(--alert);opacity:.6;font-size:16px;cursor:pointer">\u{1F5D1}</button></div>';
+        '<button data-action="del-rua" data-id="' + esc(r.id) + '" style="border:none;background:none;color:var(--alert);opacity:.6;font-size:16px;cursor:pointer">\u{1F5D1}</button></div>';
 
       html += '<div style="padding:10px 12px;border-top:1px solid var(--line)">' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">' +
-        '<input type="checkbox" data-frag="' + r.id + '"' + (fragmentado ? " checked" : "") + ' style="width:16px;height:16px" />' +
+        '<input type="checkbox" data-frag="' + esc(r.id) + '"' + (fragmentado ? " checked" : "") + ' style="width:16px;height:16px" />' +
         "Fragmentar em 4 cores, com base nos n\u00fameros de hoje</label>";
       if (s && (s.parTotal || s.imparTotal)) {
         if (fragmentado) {
@@ -3818,9 +3849,9 @@
           '<p style="font-size:11px;margin:0 0 8px;opacity:.55">Em branco, usa o corte automático de hoje (mostrado acima). Preenchido, esse número manda — 1ª metade até ele, 2ª metade dali em diante. Útil quando um só número concentra muita encomenda e puxa o corte automático pra longe do meio de verdade da rua.</p>' +
           '<div style="display:flex;gap:10px">' +
           '<div style="flex:1"><span style="font-size:11px;opacity:.65">lado par</span><br>' +
-          '<input type="number" min="0" data-corte-manual="' + r.id + '" data-lado="par" value="' + (r.corteManualPar ? r.corteManualPar : "") + '" placeholder="' + (s && s.parCorteAuto != null ? String(s.parCorteAuto) : "automático") + '" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
+          '<input type="number" min="0" data-corte-manual="' + esc(r.id) + '" data-lado="par" value="' + (r.corteManualPar ? r.corteManualPar : "") + '" placeholder="' + (s && s.parCorteAuto != null ? String(s.parCorteAuto) : "automático") + '" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
           '<div style="flex:1"><span style="font-size:11px;opacity:.65">lado ímpar</span><br>' +
-          '<input type="number" min="0" data-corte-manual="' + r.id + '" data-lado="impar" value="' + (r.corteManualImpar ? r.corteManualImpar : "") + '" placeholder="' + (s && s.imparCorteAuto != null ? String(s.imparCorteAuto) : "automático") + '" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
+          '<input type="number" min="0" data-corte-manual="' + esc(r.id) + '" data-lado="impar" value="' + (r.corteManualImpar ? r.corteManualImpar : "") + '" placeholder="' + (s && s.imparCorteAuto != null ? String(s.imparCorteAuto) : "automático") + '" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
           "</div></div>";
       }
 
@@ -3829,9 +3860,9 @@
         '<p style="font-size:11px;margin:0 0 8px;opacity:.55">Uma casa acima disso a ferramenta entende como complemento (apto/sala) colado na frente do número, e procura o número de verdade no resto do endereço.</p>' +
         '<div style="display:flex;gap:10px">' +
         '<div style="flex:1"><span style="font-size:11px;opacity:.65">lado par</span><br>' +
-        '<input type="number" min="0" data-max-rua="' + r.id + '" data-lado="par" value="' + (r.maxPar ? r.maxPar : "") + '" placeholder="ex: 470" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
+        '<input type="number" min="0" data-max-rua="' + esc(r.id) + '" data-lado="par" value="' + (r.maxPar ? r.maxPar : "") + '" placeholder="ex: 470" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
         '<div style="flex:1"><span style="font-size:11px;opacity:.65">lado ímpar</span><br>' +
-        '<input type="number" min="0" data-max-rua="' + r.id + '" data-lado="impar" value="' + (r.maxImpar ? r.maxImpar : "") + '" placeholder="ex: 471" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
+        '<input type="number" min="0" data-max-rua="' + esc(r.id) + '" data-lado="impar" value="' + (r.maxImpar ? r.maxImpar : "") + '" placeholder="ex: 471" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
         "</div></div>";
 
       html += '<div style="padding:10px 12px;border-top:1px solid var(--line)">' +
@@ -3860,12 +3891,12 @@
     var chave = ruaId + "|" + campo;
     var aberta = state.paletaAberta === chave;
     var html = '<div class="colorpick-row"><span>' + label + '</span>' +
-      '<button data-action="abrir-paleta" data-chave="' + chave + '" class="swatch" style="background:' + valor + '" aria-label="Escolher cor"></button></div>';
+      '<button data-action="abrir-paleta" data-chave="' + esc(chave) + '" class="swatch" style="background:' + corSegura(valor) + '" aria-label="Escolher cor"></button></div>';
     if (aberta) {
       html += '<div style="display:flex;flex-wrap:wrap;gap:8px;padding:4px 0 12px;justify-content:flex-end">';
       PALETA_CORES.forEach(function (cor) {
         var selecionada = normalizar(cor) === normalizar(valor);
-        html += '<button data-action="escolher-cor" data-rua="' + ruaId + '" data-campo="' + campo + '" data-cor="' + cor + '" class="swatch-mini" style="background:' + cor + ';border:' + (selecionada ? "2.5px solid var(--ink)" : "1px solid var(--line)") + '" aria-label="' + cor + '"></button>';
+        html += '<button data-action="escolher-cor" data-rua="' + esc(ruaId) + '" data-campo="' + campo + '" data-cor="' + cor + '" class="swatch-mini" style="background:' + corSegura(cor) + ';border:' + (selecionada ? "2.5px solid var(--ink)" : "1px solid var(--line)") + '" aria-label="' + cor + '"></button>';
       });
       html += "</div>";
     }
