@@ -77,7 +77,6 @@
   .swatch-mini { width: 30px; height: 30px; border-radius: 8px; padding: 0; cursor: pointer; }
   .pill { font-size: 11px; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--paper-light); color: var(--ink); cursor: pointer; font-family: inherit; font-weight: 600; }
   .pill.ativo-entregue { background: var(--ok); border-color: var(--ok); color: var(--paper-light); }
-  .pill.ativo-devolvido { background: var(--alert); border-color: var(--alert); color: var(--paper-light); }
   .pill.ativo-pendente { background: var(--accent); border-color: var(--accent); color: var(--ink); }
 </style>
 </head>
@@ -1740,7 +1739,6 @@
     }
 
     state.linhasParseadas = linhasNovas;
-    state.encontrados = {};
     salvarSessao();
     enviarListaParaNuvem();
     // Puxa de volta o que a rota já tem hoje (o que o colega já separou, as
@@ -2223,17 +2221,6 @@
     var jaEstava = state.pacoteStatus[id].separado;
     state.pacoteStatus[id].separado = valor;
     if (valor && !jaEstava) incrementarContadorGlobal();
-    sincronizarPacote(id);
-    salvarSessao();
-    render();
-  }
-  function marcarEntrega(id, campo) {
-    if (!state.pacoteStatus[id]) state.pacoteStatus[id] = { separado: false, entregue: false, devolvido: false };
-    var atual = state.pacoteStatus[id];
-    var ligar = !atual[campo];
-    atual[campo] = ligar;
-    if (campo === "entregue" && ligar) atual.devolvido = false;
-    if (campo === "devolvido" && ligar) atual.entregue = false;
     sincronizarPacote(id);
     salvarSessao();
     render();
@@ -4176,11 +4163,6 @@
       el.onclick = function () {
         var atual = statusDe(el.getAttribute("data-id")).separado;
         marcarSeparado(el.getAttribute("data-id"), !atual);
-      };
-    });
-    app.querySelectorAll('[data-action="marcar-entrega"]').forEach(function (el) {
-      el.onclick = function () {
-        marcarEntrega(el.getAttribute("data-id"), el.getAttribute("data-campo"));
       };
     });
     app.querySelectorAll('[data-action="ver-foto-pacote"]').forEach(function (el) {
