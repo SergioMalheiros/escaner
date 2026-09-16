@@ -97,6 +97,15 @@
               "cepVistos": {
                 "$cep": { ".validate": "newData.isNumber()" }
               },
+              "faixaCep": {
+                "$cep": {
+                  ".validate": "newData.hasChildren(['min','max','n'])",
+                  "min": { ".validate": "newData.isNumber() && newData.val() >= 0" },
+                  "max": { ".validate": "newData.isNumber() && newData.val() >= 0" },
+                  "n": { ".validate": "newData.isNumber() && newData.val() >= 0" },
+                  "$outro": { ".validate": false }
+                }
+              },
               "$outro": { ".validate": false }
             }
           },

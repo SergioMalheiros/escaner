@@ -1504,6 +1504,7 @@
       if (r.corteManualPar) o.corteManualPar = r.corteManualPar;
       if (r.corteManualImpar) o.corteManualImpar = r.corteManualImpar;
       if (r.cepVistos && Object.keys(r.cepVistos).length) o.cepVistos = r.cepVistos;
+      if (r.faixaCep && Object.keys(r.faixaCep).length) o.faixaCep = r.faixaCep;
       return o;
     });
   }
@@ -3723,6 +3724,11 @@
   // esse número da disputa por "qual é o número de verdade" quanto pra
   // guardar o próprio complemento (a loja/apto) e mostrar pro entregador.
   var IMPJ_COMPL = "(?:apt?o?|apart(?:amento)?|casa|cs|loja|lj|bloco|bl|sala|sl|andar|and|quadra|qd|lote|lt|fundos|sobrado)";
+  // Quantos pacotes com número confiável um CEP precisa ter, dentro de uma
+  // rua, antes da faixa aprendida (menor/maior número já visto nele) servir
+  // de desconfiômetro. Mesmo cuidado do cepVistos: CEP não pode desconfiar
+  // de si mesmo enquanto ainda está se conhecendo.
+  var IMPJ_MIN_AMOSTRAS_FAIXA_CEP = 5;
 
   function impjLimparRua(s) {
     if (!s) return "";
@@ -3785,6 +3791,21 @@
     return out;
   }
 
+  // Todo número (menos os colados a uma palavra de complemento) que aparece
+  // em algum outro campo bruto do pacote, sem repetir o próprio número
+  // suspeito. Compartilhado pelas duas formas de desconfiar de um número
+  // (teto manual por lado par/ímpar, e faixa aprendida por CEP).
+  function impjCandidatosAlternativos(numeroAtual, textoLivre) {
+    var limpo = impjLimparRuido(textoLivre || "");
+    var vistos = {}, candidatos = [];
+    impjNumerosComContexto(limpo).forEach(function (c) {
+      if (c.comKeyword) return;
+      if (c.valor === numeroAtual) return;
+      if (!vistos[c.valor]) { vistos[c.valor] = 1; candidatos.push(c.valor); }
+    });
+    return candidatos;
+  }
+
   // Uma rua às vezes vem com o número do apartamento colado na frente do
   // número da casa (ex: streetNum = "701", mas o endereço de verdade é "413"
   // — 701 é o apartamento). Sem saber até onde a rua vai, não dá pra saber
@@ -3799,20 +3820,55 @@
     var maxDele = (n % 2 === 0) ? oficial.maxPar : oficial.maxImpar;
     if (!maxDele || n <= maxDele) return null;
 
-    var limpo = impjLimparRuido(textoLivre || "");
-    var vistos = {}, candidatos = [];
-    impjNumerosComContexto(limpo).forEach(function (c) {
-      if (c.comKeyword) return;
-      if (c.valor === numeroAtual) return;
-      if (!vistos[c.valor]) { vistos[c.valor] = 1; candidatos.push(c.valor); }
-    });
-    var validos = candidatos.filter(function (v) {
+    var validos = impjCandidatosAlternativos(numeroAtual, textoLivre).filter(function (v) {
       var nv = parseInt(v, 10);
       var maxV = (nv % 2 === 0) ? oficial.maxPar : oficial.maxImpar;
       return maxV && nv <= maxV;
     });
     if (validos.length === 1) return { numero: validos[0] };
     return { numero: null };
+  }
+
+  // Mesma ideia do teto manual acima, mas sem o Sérgio precisar cadastrar
+  // nada: a cada pacote com número confiável, a rua vai guardando o
+  // menor/maior número já visto em cada CEP dela (impjAprenderFaixaCep, mais
+  // abaixo). Só quando já há amostra suficiente esse teto passa a valer —
+  // antes disso, um CEP com 1 ou 2 pacotes visto não pode desconfiar de
+  // ninguém. Longe do teto de propósito (o triplo do maior já visto, ou
+  // +50, o que for maior): rua cresce aos poucos, e isso não pode disparar
+  // suspeita a cada número novo um pouco maior — só num salto grande demais
+  // pra ser só "mais uma casa nova nesse pedaço".
+  function impjFaixaCepTeto(faixa) {
+    if (!faixa || faixa.n < IMPJ_MIN_AMOSTRAS_FAIXA_CEP) return null;
+    return Math.max(faixa.max * 3, faixa.max + 50);
+  }
+  function impjCorrigirPorFaixaCep(oficial, cep, numeroAtual, textoLivre) {
+    if (!oficial || !cep || !numeroAtual) return null;
+    var faixa = (oficial.faixaCep || {})[cep];
+    var teto = impjFaixaCepTeto(faixa);
+    if (!teto) return null;
+    var n = parseInt(numeroAtual, 10);
+    if (isNaN(n) || n <= teto) return null;
+
+    var validos = impjCandidatosAlternativos(numeroAtual, textoLivre).filter(function (v) {
+      var nv = parseInt(v, 10);
+      return nv >= faixa.min && nv <= faixa.max;
+    });
+    if (validos.length === 1) return { numero: validos[0] };
+    return { numero: null };
+  }
+  // Registra, pra essa rua e esse CEP, o número que ficou valendo pro
+  // pacote — só quando dá pra confiar nele (não é "S/N" nem ficou marcado
+  // como fora da faixa). É esse aprendizado, feito sozinho a cada lista
+  // importada, que alimenta impjCorrigirPorFaixaCep daqui a alguns dias.
+  function impjAprenderFaixaCep(oficial, cep, numero) {
+    var n = parseInt(numero, 10);
+    if (isNaN(n)) return;
+    var faixaCep = oficial.faixaCep || {};
+    var f = faixaCep[cep];
+    if (f) { f.min = Math.min(f.min, n); f.max = Math.max(f.max, n); f.n = (f.n || 0) + 1; }
+    else faixaCep[cep] = { min: n, max: n, n: 1 };
+    oficial.faixaCep = faixaCep;
   }
 
   // O que sobra do endereço depois de tirar o nome da rua e o número
@@ -4073,7 +4129,22 @@
         if (corr) {
           if (corr.numero) { r.numero = corr.numero; r.metodo += "+corrigido-faixa"; }
           else { r.foraDaFaixa = true; }
+        } else if (r.cep) {
+          // Só tenta a faixa aprendida por CEP quando a manual (acima) nem
+          // se aplicou — ela é mais precisa (Sérgio cadastrou de propósito),
+          // então tem prioridade quando as duas existirem pra mesma rua.
+          var corrCep = impjCorrigirPorFaixaCep(oficial, r.cep, r.numero, textoLivre);
+          if (corrCep) {
+            if (corrCep.numero) { r.numero = corrCep.numero; r.metodo += "+corrigido-faixa-cep"; }
+            else { r.foraDaFaixaCep = true; }
+          }
         }
+      }
+      // Aprende com o número que ficou valendo pro pacote — nunca com um que
+      // ficou sem resolver (fora da faixa) nem com "S/N", senão a própria
+      // rua ensinaria a si mesma um número errado.
+      if (oficial && r.cep && r.numero && !r.foraDaFaixa && !r.foraDaFaixaCep) {
+        impjAprenderFaixaCep(oficial, r.cep, r.numero);
       }
       r.complemento = impjExtrairComplemento(r);
       // Rua reconhecida mas nenhum número em canto nenhum (ver "sem-numero-
@@ -4098,6 +4169,7 @@
       if (r.semNumero) notas.push("SEM NÚMERO — usar a loja/referência ao lado");
       if (r.complemento) notas.push(r.complemento);
       if (r.foraDaFaixa) notas.push("conferir número — fora da faixa cadastrada");
+      if (r.foraDaFaixaCep) notas.push("conferir número — bem maior que o normal pra esse CEP");
       if (r.cepDivergente) notas.push("conferir CEP — veio " + formatarCep(r.cep) + ", essa rua costuma ser " + formatarCep(r.cepEsperado));
       // O pacote continua na lista mesmo sem código — dá pra separar na mão e
       // ver que ele existe. Some o que NÃO dá: bipar (o código é o que a câmera
@@ -4127,6 +4199,7 @@
       semCodigo: completos.filter(function (r) { return !r.codigo; }),
       corrigidosPorFaixa: completos.filter(function (r) { return r.metodo.indexOf("+corrigido-faixa") !== -1; }),
       foraDaFaixa: completos.filter(function (r) { return r.foraDaFaixa; }),
+      foraDaFaixaCep: completos.filter(function (r) { return r.foraDaFaixaCep; }),
       cepDivergente: completos.filter(function (r) { return r.cepDivergente; })
     };
   }
@@ -4184,12 +4257,16 @@
         r.semCodigo.map(function (f) { return f.nome + " (" + f.rua + " " + f.numero + ")"; }).join(" · "));
     }
     if (r.corrigidosPorFaixa.length) {
-      avisos.push(r.corrigidosPorFaixa.length + " número(s) vieram com complemento colado na frente e foram corrigidos com base na faixa cadastrada: " +
+      avisos.push(r.corrigidosPorFaixa.length + " número(s) vieram com complemento colado na frente e foram corrigidos com base na faixa da rua (cadastrada à mão ou aprendida sozinha pelo CEP): " +
         r.corrigidosPorFaixa.map(function (f) { return f.nome + " (" + f.rua + " " + f.numero + ")"; }).join(" · "));
     }
     if (r.foraDaFaixa.length) {
       avisos.push("ATENÇÃO: " + r.foraDaFaixa.length + " pacote(s) com número fora da faixa cadastrada e sem um número alternativo claro no endereço — confira antes de sair: " +
         r.foraDaFaixa.map(function (f) { return f.nome + " (" + f.rua + " " + f.numero + ", " + f.codigo + ")"; }).join(" · "));
+    }
+    if (r.foraDaFaixaCep.length) {
+      avisos.push("ATENÇÃO: " + r.foraDaFaixaCep.length + " pacote(s) com número bem maior que o normal pra esse CEP (aprendido sozinho) e sem um número alternativo claro no endereço — confira antes de sair: " +
+        r.foraDaFaixaCep.map(function (f) { return f.nome + " (" + f.rua + " " + f.numero + ", " + f.codigo + ")"; }).join(" · "));
     }
     if (r.cepDivergente.length) {
       avisos.push("Aviso: " + r.cepDivergente.length + " pacote(s) com CEP diferente do costumeiro dessa rua — pode ser rua com nome parecido ou endereço trocado, vale conferir: " +
@@ -4285,6 +4362,21 @@
     var txt = "CEP mais visto: " + formatarCep(principal) + " (" + vistos[principal] + "x)";
     if (outros > 0) txt += " · mais " + outros + " CEP(s) diferente(s) já visto(s) (" + totalOutros + "x no total)";
     return txt;
+  }
+
+  // Mesma ideia do texto acima, mas pra faixa de número aprendida sozinha
+  // dentro do CEP mais visto dessa rua — é o que impjCorrigirPorFaixaCep usa
+  // pra desconfiar de número bem maior que o normal.
+  function textoFaixaCepRua(r) {
+    var vistos = r.cepVistos || {};
+    var chaves = Object.keys(vistos);
+    if (!chaves.length) return "";
+    chaves.sort(function (a, b) { return vistos[b] - vistos[a]; });
+    var faixa = (r.faixaCep || {})[chaves[0]];
+    if (!faixa || faixa.n < IMPJ_MIN_AMOSTRAS_FAIXA_CEP) {
+      return "Ainda aprendendo a faixa de número desse CEP (precisa de mais " + (IMPJ_MIN_AMOSTRAS_FAIXA_CEP - (faixa ? faixa.n : 0)) + " pacote(s) com número confiável).";
+    }
+    return "Números vistos nesse CEP: de " + faixa.min + " a " + faixa.max + " (" + faixa.n + " pacotes) — usado pra desconfiar de número bem maior que isso.";
   }
 
   function renderMapa() {
@@ -4402,10 +4494,12 @@
         '<input type="number" min="0" data-max-rua="' + esc(r.id) + '" data-lado="impar" value="' + (r.maxImpar ? r.maxImpar : "") + '" placeholder="ex: 471" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
         "</div></div>";
 
+      var faixaCepTxt = textoFaixaCepRua(r);
       html += '<div style="padding:10px 12px;border-top:1px solid var(--line)">' +
         '<p style="font-size:11px;font-weight:600;margin:0 0 2px;opacity:.65">CEP</p>' +
         '<p style="font-size:11px;margin:0;opacity:.55">' + esc(textoCepRua(r)) + "</p>" +
         '<p style="font-size:11px;margin:6px 0 0;opacity:.5">Aprendido sozinho com os pacotes de cada dia — só avisa quando um pacote chega com CEP diferente do costumeiro dessa rua (rua com nome parecido, endereço trocado). Não muda cor nem separação.</p>' +
+        (faixaCepTxt ? '<p style="font-size:11px;margin:6px 0 0;opacity:.55">' + esc(faixaCepTxt) + "</p>" : "") +
         "</div>";
 
       html += '<div style="padding:4px 12px 10px;border-top:1px solid var(--line)">' +
