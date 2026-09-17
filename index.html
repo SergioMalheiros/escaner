@@ -3938,7 +3938,9 @@
   // veio colado a uma palavra de complemento (apto/loja/sala/...) — esses
   // nunca competem pra ser o número da casa.
   function impjNumerosComContexto(s) {
-    var out = [], re = new RegExp("(\\b" + IMPJ_COMPL + "\\.?\\s*n?[º°]?\\s*)?(\\d{1,5})\\b", "gi"), m;
+    // A barra e o hífen entram como separador ("apto/302", "ap-302") porque
+    // sem eles o 302 passava por número solto e virava número do prédio.
+    var out = [], re = new RegExp("(\\b" + IMPJ_COMPL + "\\.?\\s*[\\/-]?\\s*n?[º°]?\\s*)?(\\d{1,5})\\b", "gi"), m;
     while ((m = re.exec(s || "")) !== null) out.push({ valor: m[2], comKeyword: !!m[1] });
     return out;
   }
@@ -4156,9 +4158,15 @@
   // ";", número escondido no fim ou no início do campo de detalhe, etc.
   function impjExtrairRegistro(p) {
     var nome = p.receiverName || "";
-    var ruaRaw = (p.receiverStreet || "").trim();
+    // A etiqueta vem com a FAIXA DO CORREIO colada no nome da rua ("Rua Ator
+    // Paulo Gustavo- de 86 a 180 - lado par"): aquilo não é endereço, é o
+    // pedaço da rua que aquele CEP cobre. Sem tirar isso antes de caçar o
+    // número, o primeiro número do texto vira o número do prédio — e o 126
+    // ia parar no 86, o 250 no 145, o 282 no 182. O nome bruto continua
+    // guardado em ruaRaw/detRaw pra aparecer inteiro na conferência.
+    var ruaRaw = impjLimparRuido((p.receiverStreet || "").trim());
     var numRaw = (p.receiverStreetNum || "").trim();
-    var det = (p.receiverDetailedAddress || "").trim();
+    var det = impjLimparRuido((p.receiverDetailedAddress || "").trim());
     var cep = impjExtrairCep(p);
 
     function reg(rua, numero, metodo) {
@@ -4227,7 +4235,27 @@
 
     if (!impjRuaValida(ruaRaw)) {
       var mdt = det.match(new RegExp("^\\s*(" + IMPJ_TIPO + "[^,]*?)[,\\s]+" + IMPJ_NUM + "\\b", "i"));
-      if (mdt) return reg(impjPrefixoRua(mdt[1]), mdt[2], "det-tem-rua");
+      if (mdt) {
+        // Aqui o endereço INTEIRO veio num campo só, sem campo de número
+        // separado — e ele tanto vem "rua + prédio + apartamento" ("398 /
+        // 1101") quanto "rua + apartamento + prédio" ("Apto 307 264"). Pegar
+        // o primeiro número punha o apartamento no lugar do prédio. Vale o
+        // primeiro número SOLTO: os que vêm grudados em apto/loja/bloco/sala
+        // são complemento por escrito, e o do prédio é o que sobra. Se todos
+        // vierem soltos ("1602 126"), fica o primeiro e quem desempata é o
+        // teto da rua, lá no impjCorrigirPorFaixa.
+        var solto = null;
+        impjNumerosComContexto(det).forEach(function (c) {
+          if (!solto && !c.comKeyword) solto = c.valor;
+        });
+        // A captura da rua é preguiçosa: ela para no primeiro número, então
+        // engole a palavra do complemento que veio antes dele ("...Gustavo
+        // Apto" antes do 307). Sem tirar isso, uma rua ainda não cadastrada
+        // abriria caixa com o nome torto.
+        var ruaDet = mdt[1].replace(new RegExp("[\\s,.;-]*" + IMPJ_COMPL + "\\.?\\s*$", "i"), "");
+        if (!impjRuaValida(ruaDet)) ruaDet = mdt[1];
+        return reg(impjPrefixoRua(ruaDet), solto || mdt[2], "det-tem-rua");
+      }
       return reg(null, null, "falhou");
     }
 
