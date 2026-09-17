@@ -1166,10 +1166,14 @@
     if (ruaObj && ruaObj.fragmentar && corte !== null && corte !== undefined) {
       var primeira = n <= corte;
       var cor4 = par ? (primeira ? cores.par1 : cores.par2) : (primeira ? cores.impar1 : cores.impar2);
-      return { label: par ? "PAR" : "\u00cdMPAR", cor: cor4 };
+      // A metade sai daqui como número (1 ou 2) porque a aba Hoje precisa
+      // dela pra duas coisas: ordenar as caixas na ordem em que se anda a rua,
+      // e fazer o botão flutuante pular pra metade CERTA do outro lado.
+      return { label: par ? "PAR" : "\u00cdMPAR", cor: cor4, metade: primeira ? 1 : 2 };
     }
     var corSimples = par ? cores.par1 : cores.impar1;
-    return { label: par ? "PAR" : "\u00cdMPAR", cor: corSimples };
+    // rua sem fragmentar não tem metade: 0 nos dois lados
+    return { label: par ? "PAR" : "\u00cdMPAR", cor: corSimples, metade: 0 };
   }
   // "R." e "Rua", "Av." e "Avenida"... a lista que sai do sistema nem sempre
   // escreve a rua igual ao que foi cadastrado nas Faixas. Aqui a gente separa
@@ -2888,14 +2892,14 @@
         return;
       }
       var key = ruaMatch.id + "|" + c.cor;
-      if (!porGrupo[key]) porGrupo[key] = { ruaNome: ruaMatch.nome, label: c.label, cor: c.cor, itens: [] };
+      if (!porGrupo[key]) porGrupo[key] = { ruaNome: ruaMatch.nome, label: c.label, cor: c.cor, metade: c.metade, itens: [] };
       porGrupo[key].itens.push(l);
     });
 
     var listaGrupos = Object.keys(porGrupo).map(function (k) {
       var g = porGrupo[k];
       var itens = g.itens.slice().sort(function (a, b) { return ordenarNumerico(a.numero, b.numero); });
-      return { ruaNome: g.ruaNome, label: g.label, cor: g.cor, itens: itens, total: itens.length, semFaixa: !!g.semFaixa };
+      return { ruaNome: g.ruaNome, label: g.label, cor: g.cor, metade: g.metade || 0, itens: itens, total: itens.length, semFaixa: !!g.semFaixa };
     }).sort(function (a, b) {
       // as caixas "sem faixa" ficam sempre no fim, pra não atrapalhar quem
       // está separando pelas cores.
@@ -2904,7 +2908,20 @@
       // String(... || "") em vez de usar direto: uma configuração de faixa
       // antiga/incompleta (cor faltando) estourava aqui e derrubava a tela
       // pelo mesmo caminho do "S/N".
-      return rc !== 0 ? rc : String(a.cor || "").localeCompare(String(b.cor || ""));
+      if (rc !== 0) return rc;
+      // Ordem das caixas dentro da rua: PAR 1ª, ÍMPAR 1ª, PAR 2ª, ÍMPAR 2ª —
+      // as metades emparelhadas, na ordem em que se anda a rua. Quem separa
+      // entrega no 26 par, atravessa pro 19 ímpar, volta pro 38, e só desce
+      // pra segunda metade quando a primeira acaba.
+      //
+      // Antes a ordem saía do CÓDIGO HEXADECIMAL da cor, que não tem relação
+      // nenhuma com a rua: com as cores padrão dava PAR 1ª (#1E88E5), PAR 2ª
+      // (#3949AB), ÍMPAR 2ª (#6D4C41), ÍMPAR 1ª (#FB8C00) — a segunda metade
+      // do ímpar ANTES da primeira. Pior: trocar uma cor na aba Faixas
+      // reordenava as caixas.
+      if (a.metade !== b.metade) return a.metade - b.metade;
+      if (a.label !== b.label) return a.label === "PAR" ? -1 : 1;
+      return String(a.cor || "").localeCompare(String(b.cor || ""));
     });
 
     // Código repetido em mais de uma linha (às vezes a própria lista vem
@@ -3632,11 +3649,23 @@
     var atual = grupos[idx];
     if (!atual || atual.semFaixa) return [];
     var labelAlvo = atual.label === "PAR" ? "\u00cdMPAR" : "PAR";
-    var out = [];
+    var mesmaMetade = [], qualquerMetade = [];
     grupos.forEach(function (g, i) {
-      if (i !== idx && !g.semFaixa && g.ruaNome === atual.ruaNome && g.label === labelAlvo) out.push(i);
+      if (i === idx || g.semFaixa || g.ruaNome !== atual.ruaNome || g.label !== labelAlvo) return;
+      qualquerMetade.push(i);
+      if (g.metade === atual.metade) mesmaMetade.push(i);
     });
-    return out;
+    // A MESMA metade do outro lado é o destino certo: é o vizinho de frente.
+    // Antes o botão pegava a primeira caixa do outro lado que existisse — que
+    // com as cores padrão era a SEGUNDA metade, porque a ordem saía do código
+    // hexadecimal da cor. Entregando no 26, ele mandava pro 211 (outro extremo
+    // da rua) em vez do 19.
+    //
+    // Quando aquela metade não tem caixa nenhuma do outro lado, vale a que
+    // existir: é melhor ir pro outro lado da rua do que ficar sem botão. Isso
+    // acontece de verdade — na Guilherme Greenhalgh o lado par só tem o nº 16,
+    // então a 2ª metade do ímpar não tem par nenhum na frente dela.
+    return mesmaMetade.length ? mesmaMetade : qualquerMetade;
   }
   // Guarda, por grupo (card) da aba Hoje, o scrollY de onde a pessoa saiu da
   // \u00faltima vez ao trocar de lado PAR/\u00cdMPAR \u2014 s\u00f3 nesta sess\u00e3o do navegador
@@ -3676,8 +3705,9 @@
       var outroLado = candidatosOutroLado(grupos, idxGrupo);
       if (outroLado.length) {
         var idsAlvo = outroLado.map(function (i) { return "grupo-" + i; }).join(",");
-        var labelAlvo = grupos[outroLado[0]].label;
-        var totalAlvo = grupos[outroLado[0]].total;
+        var grupoAlvo = grupos[outroLado[0]];
+        var labelAlvo = grupoAlvo.label + (grupoAlvo.metade ? " \u00b7 " + grupoAlvo.metade + "\u00aa metade" : "");
+        var totalAlvo = grupoAlvo.total;
         html += '<button data-action="ir-outro-lado" data-origem="' + idGrupo + '" data-alvos="' + idsAlvo + '" style="display:block;width:100%;text-align:center;padding:7px 10px;border:none;border-top:1px solid rgba(0,0,0,.12);background:var(--paper-deep);color:var(--ink);font-weight:600;font-size:12px;font-family:inherit;cursor:pointer">\u2195 Ver ' + labelAlvo + " desta rua \u00b7 " + totalAlvo + " pacotes</button>";
       }
 
