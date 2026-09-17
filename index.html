@@ -3825,7 +3825,13 @@
         html += '<li id="pacote-' + esc(item.id) + '" style="padding:' + recuo + ';border-top:1px solid var(--line)">' +
           '<div data-action="toggle-separado" data-id="' + esc(item.id) + '" style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer;margin-bottom:8px">' +
           '<span class="checkbox' + (st.separado ? " done" : "") + '">' + (st.separado ? "\u2713" : "") + "</span>" +
-          '<span' + (st.separado ? ' class="nome-separado"' : "") + ">" + (qtdMesmoNumero > 1 ? esc(item.nome || "sem nome") : "n\u00ba " + esc(item.numero) + (item.nome ? " \u00b7 " + esc(item.nome) : "")) + "</span></div>" +
+          // Só o nome, nunca o número: o cabeçalho logo acima (o "n\u00ba 250"
+          // do bloco primeiroDoNumero) já mostra o número de TODO endereço,
+          // com um pacote ou com cinco. Antes, endereço de um pacote só
+          // repetia o número aqui de novo — e como quase metade dos números
+          // de uma rua tem um pacote só, a lista ficava com o número
+          // duplicado em linha sim, linha não.
+          '<span' + (st.separado ? ' class="nome-separado"' : "") + ">" + esc(item.nome || "sem nome") + "</span></div>" +
           '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
           botaoFoto +
           "</div>" +
