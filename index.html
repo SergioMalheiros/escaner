@@ -3136,7 +3136,15 @@
 
     var ruaMatch = encontrarRuaMapeada(linha.rua, state.mapaRuas);
     var classificacao = ruaMatch ? classificar(linha.numero, ruaMatch, calcularSplitsPorRua()) : null;
-    state.resultadoScan = { encontrado: true, rua: linha.rua, numero: linha.numero, classificacao: classificacao };
+    // Sem cor pra mostrar, o motivo importa: os tr\u00eas casos abaixo v\u00e3o pra
+    // caixas cinzas DIFERENTES, e cada um pede uma coisa diferente de quem
+    // est\u00e1 com o pacote na m\u00e3o. Mesmos tr\u00eas casos, na mesma ordem, de
+    // calcularResultado \u2014 se um dia mudar l\u00e1, muda aqui junto.
+    state.resultadoScan = {
+      encontrado: true, rua: linha.rua, numero: linha.numero, classificacao: classificacao,
+      motivo: classificacao ? null
+        : (linha.rua === RUA_ILEGIVEL ? "ilegivel" : (!ruaMatch ? "sem-faixa" : "sem-numero"))
+    };
     tocarBipeSucesso();
     if (classificacao) agendarFlashScan(classificacao, linha.rua);
     marcarSeparado(linha.id, true);
@@ -3584,6 +3592,25 @@
       "</div>";
   }
 
+  // O pacote foi achado e separado, mas n\u00e3o tem cor pra mostrar. Antes os
+  // tr\u00eas motivos davam a MESMA frase, "essa rua n\u00e3o est\u00e1 cadastrada" \u2014 e
+  // num deles isso era mentira: no "SEM N\u00ba" a rua est\u00e1 cadastrada sim, o
+  // que falta \u00e9 o n\u00famero. Dava pra parar no meio do galp\u00e3o pra cadastrar
+  // uma rua que j\u00e1 estava l\u00e1. Cada frase agora diz o que \u00e9 e em qual caixa
+  // cinza o pacote foi parar, pro nome bater com o da aba Hoje.
+  function mensagemScanSemCor(r) {
+    if (r.motivo === "ilegivel") {
+      return "Achei o pacote, mas o endere\u00e7o n\u00e3o deu pra decifrar \u2014 confira na etiqueta. " +
+        'Est\u00e1 na caixa "' + RUA_ILEGIVEL + '", no fim da lista.';
+    }
+    if (r.motivo === "sem-numero") {
+      return "Achei o pacote (" + r.rua + "), mas ele veio SEM N\u00daMERO \u2014 a rua est\u00e1 cadastrada, " +
+        'o n\u00famero \u00e9 que faltou. Est\u00e1 na caixa "SEM N\u00ba" dessa rua, no fim da lista.';
+    }
+    return "Achei o pacote (" + r.rua + ", n\u00ba " + r.numero + "), mas essa rua n\u00e3o est\u00e1 cadastrada em Faixas \u2014 " +
+      'por isso ele n\u00e3o tem cor. Est\u00e1 na caixa "SEM FAIXA" dessa rua, no fim da lista.';
+  }
+
   function renderCamera() {
     if (!state.linhasParseadas) {
       return '<div class="warn-box">Carregue a lista do dia na aba "Hoje" primeiro \u2014 \u00e9 dela que vem o n\u00famero de cada pacote.</div>';
@@ -3626,7 +3653,7 @@
           '<p style="font-size:32px;font-weight:700;margin:0 0 10px;color:' + corTextoParaHex(c.cor) + '">' + c.label + '</p>' +
           '<p style="font-size:16px;font-weight:600;margin:0;color:' + corTextoParaHex(c.cor) + ';opacity:.9">' + esc(nomeCurtoRua(r.rua)) + '</p></div>';
       } else if (r.encontrado) {
-        html += '<div class="result-warn" style="margin-top:12px">Achei o pacote (' + esc(r.rua) + ", n\u00ba " + esc(r.numero) + ") mas essa rua n\u00e3o est\u00e1 cadastrada.</div>";
+        html += '<div class="result-warn" style="margin-top:12px">' + esc(mensagemScanSemCor(r)) + "</div>";
       } else {
         html += '<div class="result-warn" style="margin-top:12px">' + (r.semLista ? "carregue a lista do dia primeiro." : 'c\u00f3digo "' + esc(r.codigo) + '" n\u00e3o encontrado na lista de hoje.') + "</div>";
       }
