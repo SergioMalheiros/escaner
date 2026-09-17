@@ -1189,6 +1189,32 @@
     if (m && TIPOS_RUA[m[1]]) return { tipo: TIPOS_RUA[m[1]], nucleo: m[2].trim() };
     return { tipo: null, nucleo: t };
   }
+  // Nome curto pra tela do bipe: só cor + esse nome, sem número e sem quem
+  // recebe (isso já fica detalhado na aba Hoje) — a ideia é decidir pela cor,
+  // não ler texto. Conta só as palavras do nome de verdade (ignora o tipo —
+  // Rua/Avenida/... — e conectivos como "e"/"de"/"da" no meio), mantém até 2
+  // delas e descarta o resto, conectivo incluso. Isso evita as duas formas
+  // óbvias de dar errado: rua de nome único virando só o tipo sozinho
+  // ("Rua"), e nome cortado terminando pendurado num conectivo ("Rua Mariz
+  // e"). "Rua Mariz e Barros" (2 palavras de nome) sai inteira; "Rua Ator
+  // Paulo Gustavo" (3) vira "Rua Ator Paulo".
+  var CONECTIVOS_RUA = { e: 1, de: 1, da: 1, do: 1, dos: 1, das: 1 };
+  function nomeCurtoRua(nome) {
+    var tokens = String(nome || "").trim().split(/\s+/);
+    if (!tokens[0]) return nome;
+    var primeiro = normalizar(tokens[0]).replace(/\.$/, "");
+    var temTipo = !!TIPOS_RUA[primeiro];
+    var resto = temTipo ? tokens.slice(1) : tokens;
+    var mantidos = [], conteudo = 0;
+    for (var i = 0; i < resto.length; i++) {
+      mantidos.push(resto[i]);
+      if (!CONECTIVOS_RUA[normalizar(resto[i])]) {
+        conteudo++;
+        if (conteudo === 2) break;
+      }
+    }
+    return (temTipo ? [tokens[0]] : []).concat(mantidos).join(" ");
+  }
   // "Rua Par" NÃO pode casar dentro de "Rua Paraíso". Antes a comparação era
   // indexOf puro com o mínimo de 3 letras, então um nome curto cadastrado
   // casava no meio do nome de outra rua — e o pacote ia pra caixa colorida de
@@ -2936,9 +2962,9 @@
   // o próximo escaneamento; cada novo escaneamento reinicia a contagem, então
   // nunca some "cedo demais" por causa de um flash anterior ainda correndo.
   var flashTimeoutId = null;
-  function agendarFlashScan(classificacao, rua, numero) {
+  function agendarFlashScan(classificacao, rua) {
     if (flashTimeoutId) clearTimeout(flashTimeoutId);
-    state.flashScan = { cor: classificacao.cor, label: classificacao.label, rua: rua, numero: numero };
+    state.flashScan = { cor: classificacao.cor, label: classificacao.label, rua: rua };
     flashTimeoutId = setTimeout(function () {
       flashTimeoutId = null;
       state.flashScan = null;
@@ -3035,9 +3061,9 @@
 
     var ruaMatch = encontrarRuaMapeada(linha.rua, state.mapaRuas);
     var classificacao = ruaMatch ? classificar(linha.numero, ruaMatch, calcularSplitsPorRua()) : null;
-    state.resultadoScan = { encontrado: true, rua: linha.rua, numero: linha.numero, nome: linha.nome, classificacao: classificacao };
+    state.resultadoScan = { encontrado: true, rua: linha.rua, numero: linha.numero, classificacao: classificacao };
     tocarBipeSucesso();
-    if (classificacao) agendarFlashScan(classificacao, linha.rua, linha.numero);
+    if (classificacao) agendarFlashScan(classificacao, linha.rua);
     marcarSeparado(linha.id, true);
   }
 
@@ -3479,7 +3505,7 @@
     var corTexto = corTextoParaHex(f.cor);
     return '<div style="position:fixed;inset:0;background:' + corSegura(f.cor) + ';z-index:1200;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;pointer-events:none">' +
       '<p style="font-size:60px;font-weight:800;margin:0;color:' + corTexto + '">' + f.label + '</p>' +
-      '<p style="font-size:20px;font-weight:600;margin:0;color:' + corTexto + ';opacity:.9">' + esc(f.rua) + ' · nº ' + esc(f.numero) + '</p>' +
+      '<p style="font-size:20px;font-weight:600;margin:0;color:' + corTexto + ';opacity:.9">' + esc(nomeCurtoRua(f.rua)) + '</p>' +
       "</div>";
   }
 
@@ -3523,7 +3549,7 @@
         var c = r.classificacao;
         html += '<div class="result-color" style="margin-top:12px;background:' + c.cor + '">' +
           '<p style="font-size:32px;font-weight:700;margin:0 0 10px;color:' + corTextoParaHex(c.cor) + '">' + c.label + '</p>' +
-          '<p style="font-size:16px;font-weight:600;margin:0;color:' + corTextoParaHex(c.cor) + ';opacity:.9">' + esc(r.rua) + ' \u00b7 n\u00ba ' + esc(r.numero) + (r.nome ? " \u00b7 " + esc(r.nome) : "") + '</p></div>';
+          '<p style="font-size:16px;font-weight:600;margin:0;color:' + corTextoParaHex(c.cor) + ';opacity:.9">' + esc(nomeCurtoRua(r.rua)) + '</p></div>';
       } else if (r.encontrado) {
         html += '<div class="result-warn" style="margin-top:12px">Achei o pacote (' + esc(r.rua) + ", n\u00ba " + esc(r.numero) + ") mas essa rua n\u00e3o est\u00e1 cadastrada.</div>";
       } else {
