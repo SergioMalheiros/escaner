@@ -56,6 +56,11 @@
               "cepVistos": {
                 "$cep": { ".validate": "newData.isNumber()" }
               },
+              "cepEndereco": {
+                "$numero": {
+                  "$cep": { ".validate": "newData.isNumber() && newData.val() >= 0" }
+                }
+              },
               "faixaCep": {
                 "$cep": {
                   ".validate": "newData.hasChildren(['min','max','n'])",

@@ -1555,6 +1555,7 @@
       if (r.corteManualImpar) o.corteManualImpar = r.corteManualImpar;
       if (r.cepVistos && Object.keys(r.cepVistos).length) o.cepVistos = r.cepVistos;
       if (r.faixaCep && Object.keys(r.faixaCep).length) o.faixaCep = r.faixaCep;
+      if (r.cepEndereco && Object.keys(r.cepEndereco).length) o.cepEndereco = r.cepEndereco;
       return o;
     });
   }
@@ -3805,6 +3806,13 @@
   // de desconfiômetro. Mesmo cuidado do cepVistos: CEP não pode desconfiar
   // de si mesmo enquanto ainda está se conhecendo.
   var IMPJ_MIN_AMOSTRAS_FAIXA_CEP = 5;
+  // Quantas vezes um PRÉDIO (rua + número) precisa ter aparecido, sempre com o
+  // mesmo CEP e sem nenhuma exceção, antes de um CEP diferente virar aviso.
+  // Medido nos 4 dias de lista real: com 5 e exigindo histórico sem exceção dá
+  // 1 a 5 avisos por dia. Sem a exigência de "sem exceção" dava 4 a 10, e não
+  // calava nunca — porque 25% dos endereços têm CEP digitado errado por quem
+  // comprou, e isso é ruído constante, não sinal.
+  var MIN_PACOTES_CEP_ENDERECO = 5;
 
   function impjLimparRua(s) {
     if (!s) return "";
@@ -4310,22 +4318,45 @@
       if (oficial) r.rua = oficial.nome;
       r.numero = impjNormalizarNumero(r.numero);
 
-      // Cada rua cadastrada vai "aprendendo" sozinha, com os próprios
-      // pacotes de todo dia, qual CEP é o dela — sem precisar de nenhuma
-      // fonte externa. Só desconfia depois de já conhecer a rua de verdade
-      // (pelo menos 3 pacotes vistos antes); antes disso é só ela ainda
-      // aprendendo, e todo mundo seria "CEP novo".
+      // Cada rua vai "aprendendo" sozinha, com os próprios pacotes de todo
+      // dia, quais CEPs são dela — sem nenhuma fonte externa. Isso alimenta o
+      // texto da aba Faixas e a faixa de número por CEP.
+      //
+      // O AVISO, porém, é por PRÉDIO, não por rua. Antes ele disparava quando
+      // chegava um CEP que a RUA nunca tinha visto, e dizia "essa rua costuma
+      // ser X" — no singular. Mas rua comprida tem vários CEPs de verdade (os
+      // Correios dão um por trecho): a Ator Paulo Gustavo tem 14 nos 4 dias de
+      // lista real, todos legítimos. O aviso então dizia que 13 CEPs certos
+      // estavam errados, e enchia o primeiro dia de barulho (15 avisos) sem
+      // apontar problema nenhum.
+      //
+      // Por prédio o sinal é outro, e esse sim quer dizer alguma coisa: "este
+      // número SEMPRE foi 24220-121, nas 8 vezes que apareceu, e agora veio
+      // 24220-120". Aí ou quem comprou digitou o CEP errado, ou o número lido
+      // não é o desse pacote — e é a segunda hipótese que vale conferir.
       if (oficial && r.cep) {
         var cepVistos = oficial.cepVistos || {};
-        var chavesCep = Object.keys(cepVistos);
-        var totalCepAntes = chavesCep.reduce(function (soma, k) { return soma + cepVistos[k]; }, 0);
-        if (totalCepAntes >= 3 && !cepVistos[r.cep]) {
-          chavesCep.sort(function (a, b) { return cepVistos[b] - cepVistos[a]; });
-          r.cepDivergente = true;
-          r.cepEsperado = chavesCep[0];
-        }
         cepVistos[r.cep] = (cepVistos[r.cep] || 0) + 1;
         oficial.cepVistos = cepVistos;
+
+        // Só prédio com número mesmo. "S/N" tem barra, e barra é caractere
+        // proibido em chave do Firebase — gravar isso derrubaria o salvamento
+        // das Faixas INTEIRO, não só este registro.
+        if (r.numero && /^\d{1,5}[A-Za-z]?$/.test(r.numero)) {
+          var porEndereco = oficial.cepEndereco || {};
+          var doPredio = porEndereco[r.numero] || {};
+          var cepsDoPredio = Object.keys(doPredio);
+          var vezes = cepsDoPredio.length === 1 ? doPredio[cepsDoPredio[0]] : 0;
+          // só desconfia de prédio com histórico limpo: um CEP só, sem exceção
+          if (cepsDoPredio.length === 1 && vezes >= MIN_PACOTES_CEP_ENDERECO && !doPredio[r.cep]) {
+            r.cepDivergente = true;
+            r.cepEsperado = cepsDoPredio[0];
+            r.cepVezes = vezes;
+          }
+          doPredio[r.cep] = (doPredio[r.cep] || 0) + 1;
+          porEndereco[r.numero] = doPredio;
+          oficial.cepEndereco = porEndereco;
+        }
       }
 
       var textoLivre = [r.ruaRaw, r.streetnumRaw, r.detRaw].filter(Boolean).join(" ");
@@ -4390,7 +4421,7 @@
       if (r.complemento) notas.push(r.complemento);
       if (r.foraDaFaixa) notas.push("conferir número — fora da faixa cadastrada");
       if (r.foraDaFaixaCep) notas.push("conferir número — bem maior que o normal pra esse CEP");
-      if (r.cepDivergente) notas.push("conferir CEP — veio " + formatarCep(r.cep) + ", essa rua costuma ser " + formatarCep(r.cepEsperado));
+      if (r.cepDivergente) notas.push("conferir CEP — veio " + formatarCep(r.cep) + ", mas este nº sempre foi " + formatarCep(r.cepEsperado) + " (" + r.cepVezes + "x, sem exceção)");
       // O pacote continua na lista mesmo sem código — dá pra separar na mão e
       // ver que ele existe. Some o que NÃO dá: bipar (o código é o que a câmera
       // procura) e fotografar (o código é o nome da foto no Firebase e dentro
@@ -4502,7 +4533,7 @@
         r.foraDaFaixaCep.map(function (f) { return f.nome + " (" + f.rua + " " + f.numero + ", " + f.codigo + ")"; }).join(" · "));
     }
     if (r.cepDivergente.length) {
-      avisos.push("Aviso: " + r.cepDivergente.length + " pacote(s) com CEP diferente do costumeiro dessa rua — pode ser rua com nome parecido ou endereço trocado, vale conferir: " +
+      avisos.push("Aviso: " + r.cepDivergente.length + " pacote(s) com CEP diferente do que aquele prédio sempre teve — pode ser CEP digitado errado por quem comprou (não muda nada), ou o número estar trocado (aí muda). Vale conferir: " +
         r.cepDivergente.map(function (f) { return f.nome + " (" + f.rua + " " + f.numero + ", " + f.codigo + ")"; }).join(" · "));
     }
     if (r.removidosBase) avisos.push("(" + r.removidosBase + " registro(s) duplicado(s) de pedidos com peças foram descartados sem afetar a contagem.)");
