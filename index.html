@@ -1132,24 +1132,25 @@
       var pares = porRua[ruaId].par.slice().sort(function (a, b) { return a - b; });
       var impares = porRua[ruaId].impar.slice().sort(function (a, b) { return a - b; });
       var ruaObj = porRua[ruaId].ruaObj;
-      var parCorteAuto = pares.length ? pares[Math.ceil(pares.length / 2) - 1] : null;
-      var imparCorteAuto = impares.length ? impares[Math.ceil(impares.length / 2) - 1] : null;
+      // UM corte por rua, valendo pros dois lados. Antes era um por lado, cada
+      // um a mediana por quantidade de pacote DAQUELE lado — e as duas medianas
+      // caem em pontos diferentes da rua. Na lista real de 17/09 o corte do par
+      // dava 282 e o do ímpar 241: andando até o 282, 14 pacotes ímpares entre
+      // 241 e 282 já estavam na caixa da 2ª metade, embora estivessem no trecho
+      // que ainda é a primeira. Quem separa atravessa a rua o tempo todo, então
+      // a metade tem que ser um ponto da RUA, não um ponto de cada lado.
+      var todos = pares.concat(impares).sort(function (a, b) { return a - b; });
+      var corteAuto = todos.length ? todos[Math.ceil(todos.length / 2) - 1] : null;
       // "Onde termina a 1ª metade" (opcional, em Faixas) deixa quem já conhece
-      // a rota corrigir o corte automático — que é só a mediana por
-      // quantidade de pacote, e por isso pode cair num lugar estranho quando
-      // um único número concentra muita encomenda (ex: um shopping inteiro
-      // puxando a "metade" pra longe do meio de verdade da rua). Em branco,
-      // continua tudo igual a antes.
-      var parManual = ruaObj.corteManualPar != null ? ruaObj.corteManualPar : null;
-      var imparManual = ruaObj.corteManualImpar != null ? ruaObj.corteManualImpar : null;
+      // a rota corrigir o corte automático, que pode cair num lugar estranho
+      // quando um único número concentra muita encomenda (ex: um shopping
+      // inteiro puxando a "metade" pra longe do meio de verdade da rua).
+      var manual = ruaObj.corteMetade != null ? ruaObj.corteMetade : null;
       splits[ruaId] = {
-        parCorte: parManual != null ? parManual : parCorteAuto,
-        parCorteAuto: parCorteAuto,
-        parManual: parManual != null,
+        corte: manual != null ? manual : corteAuto,
+        corteAuto: corteAuto,
+        manual: manual != null,
         parTotal: pares.length,
-        imparCorte: imparManual != null ? imparManual : imparCorteAuto,
-        imparCorteAuto: imparCorteAuto,
-        imparManual: imparManual != null,
         imparTotal: impares.length
       };
     });
@@ -1161,7 +1162,7 @@
     var par = (n % 2 === 0);
     var cores = (ruaObj && ruaObj.cores) || coresPadrao();
     var s = splits && ruaObj && splits[ruaObj.id];
-    var corte = s ? (par ? s.parCorte : s.imparCorte) : null;
+    var corte = s ? s.corte : null;
     if (ruaObj && ruaObj.fragmentar && corte !== null && corte !== undefined) {
       var primeira = n <= corte;
       var cor4 = par ? (primeira ? cores.par1 : cores.par2) : (primeira ? cores.impar1 : cores.impar2);
@@ -1537,6 +1538,14 @@
       var m = Object.assign({ cores: coresPadrao() }, r, { cores: r.cores || coresPadrao() });
       if (m.faixaCompleta && m.fragmentar === undefined) m.fragmentar = true;
       delete m.faixaCompleta;
+      // Os dois cortes (um por lado) viraram um só. O do lado par vira o corte
+      // da rua; só cai no do ímpar se o par nunca tiver sido preenchido.
+      if (m.corteMetade == null) {
+        if (m.corteManualPar != null) m.corteMetade = m.corteManualPar;
+        else if (m.corteManualImpar != null) m.corteMetade = m.corteManualImpar;
+      }
+      delete m.corteManualPar;
+      delete m.corteManualImpar;
       return m;
     });
   }
@@ -1551,8 +1560,14 @@
       };
       if (r.maxPar) o.maxPar = r.maxPar;
       if (r.maxImpar) o.maxImpar = r.maxImpar;
-      if (r.corteManualPar) o.corteManualPar = r.corteManualPar;
-      if (r.corteManualImpar) o.corteManualImpar = r.corteManualImpar;
+      // Vai na chave ANTIGA de propósito. O corte virou um só (corteMetade),
+      // mas as regras do banco têm "$outro: false" — chave nova seria recusada
+      // e a recusa derruba a gravação das Faixas INTEIRA, não só esse campo.
+      // Reaproveitar corteManualPar evita exigir republicar as regras, e ainda
+      // migra sozinho: o valor que já estava no lado par vira o corte da rua.
+      // Colega numa versão antiga do app lê isso como o corte do par — que é
+      // exatamente o que era antes, então degrada sem quebrar nada.
+      if (r.corteMetade) o.corteManualPar = r.corteMetade;
       if (r.cepVistos && Object.keys(r.cepVistos).length) o.cepVistos = r.cepVistos;
       if (r.faixaCep && Object.keys(r.faixaCep).length) o.faixaCep = r.faixaCep;
       if (r.cepEndereco && Object.keys(r.cepEndereco).length) o.cepEndereco = r.cepEndereco;
@@ -1746,13 +1761,11 @@
   // na tela agora mesmo (o texto "corte no nº X" em Faixas e as cores da aba
   // Hoje), por isso re-renderiza — seguro aqui porque "onchange" só dispara
   // quando o campo já perdeu o foco, nunca no meio da digitação.
-  function definirCorteManual(ruaId, lado, valor) {
+  function definirCorteManual(ruaId, valor) {
     var rua = state.mapaRuas.find(function (r) { return r.id === ruaId; });
     if (!rua) return;
     var n = parseInt(valor, 10);
-    var v = (valor && n > 0) ? n : undefined;
-    if (lado === "par") rua.corteManualPar = v;
-    else rua.corteManualImpar = v;
+    rua.corteMetade = (valor && n > 0) ? n : undefined;
     salvarMapa();
     render();
   }
@@ -4725,7 +4738,7 @@
         "Fragmentar em 4 cores, com base nos n\u00fameros de hoje</label>";
       if (s && (s.parTotal || s.imparTotal)) {
         if (fragmentado) {
-          html += '<p style="font-size:11px;margin:6px 0 0;opacity:.6">hoje: ' + s.parTotal + " pares (corte no n\u00ba " + (s.parCorte != null ? s.parCorte : "\u2014") + (s.parManual ? " \u00b7 manual" : "") + ") \u00b7 " + s.imparTotal + " \u00edmpares (corte no n\u00ba " + (s.imparCorte != null ? s.imparCorte : "\u2014") + (s.imparManual ? " \u00b7 manual" : "") + ")</p>";
+          html += '<p style="font-size:11px;margin:6px 0 0;opacity:.6">hoje: ' + s.parTotal + " pares \u00b7 " + s.imparTotal + " \u00edmpares \u00b7 1\u00aa metade vai at\u00e9 o n\u00ba " + (s.corte != null ? s.corte : "\u2014") + (s.manual ? " (voc\u00ea escolheu)" : " (autom\u00e1tico)") + "</p>";
         } else {
           html += '<p style="font-size:11px;margin:6px 0 0;opacity:.6">hoje: ' + s.parTotal + " pares \u00b7 " + s.imparTotal + " \u00edmpares</p>";
         }
@@ -4739,13 +4752,9 @@
       if (fragmentado) {
         html += '<div style="padding:10px 12px;border-top:1px solid var(--line)">' +
           '<p style="font-size:11px;font-weight:600;margin:0 0 2px;opacity:.65">ONDE TERMINA A 1ª METADE (opcional)</p>' +
-          '<p style="font-size:11px;margin:0 0 8px;opacity:.55">Em branco, usa o corte automático de hoje (mostrado acima). Preenchido, esse número manda — 1ª metade até ele, 2ª metade dali em diante. Útil quando um só número concentra muita encomenda e puxa o corte automático pra longe do meio de verdade da rua.</p>' +
-          '<div style="display:flex;gap:10px">' +
-          '<div style="flex:1"><span style="font-size:11px;opacity:.65">lado par</span><br>' +
-          '<input type="number" min="0" data-corte-manual="' + esc(r.id) + '" data-lado="par" value="' + (r.corteManualPar ? r.corteManualPar : "") + '" placeholder="' + (s && s.parCorteAuto != null ? String(s.parCorteAuto) : "automático") + '" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
-          '<div style="flex:1"><span style="font-size:11px;opacity:.65">lado ímpar</span><br>' +
-          '<input type="number" min="0" data-corte-manual="' + esc(r.id) + '" data-lado="impar" value="' + (r.corteManualImpar ? r.corteManualImpar : "") + '" placeholder="' + (s && s.imparCorteAuto != null ? String(s.imparCorteAuto) : "automático") + '" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" /></div>' +
-          "</div></div>";
+          '<p style="font-size:11px;margin:0 0 8px;opacity:.55">Vale pros DOIS lados: é um ponto da rua, não um de cada lado. Os dois viram 2ª metade no mesmo lugar, então atravessar a rua não muda a cor da metade. Em branco, usa o corte automático de hoje (mostrado acima).</p>' +
+          '<input type="number" min="0" data-corte-manual="' + esc(r.id) + '" value="' + (r.corteMetade ? r.corteMetade : "") + '" placeholder="' + (s && s.corteAuto != null ? String(s.corteAuto) : "automático") + '" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" />' +
+          "</div>";
       }
 
       html += '<div style="padding:10px 12px;border-top:1px solid var(--line)">' +
@@ -4942,7 +4951,7 @@
       el.onchange = function () { definirMaxRua(el.getAttribute("data-max-rua"), el.getAttribute("data-lado"), el.value); };
     });
     app.querySelectorAll("[data-corte-manual]").forEach(function (el) {
-      el.onchange = function () { definirCorteManual(el.getAttribute("data-corte-manual"), el.getAttribute("data-lado"), el.value); };
+      el.onchange = function () { definirCorteManual(el.getAttribute("data-corte-manual"), el.value); };
     });
     app.querySelectorAll('[data-action="ir-outro-lado"]').forEach(function (el) {
       el.onclick = function () { irParaOutroLado(el.getAttribute("data-origem"), el.getAttribute("data-alvos")); };
