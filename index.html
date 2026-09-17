@@ -78,6 +78,12 @@
   .pill { font-size: 11px; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--paper-light); color: var(--ink); cursor: pointer; font-family: inherit; font-weight: 600; }
   .pill.ativo-entregue { background: var(--ok); border-color: var(--ok); color: var(--paper-light); }
   .pill.ativo-pendente { background: var(--accent); border-color: var(--accent); color: var(--ink); }
+  /* Opção disponível, mas não é a que está valendo: visível pra dar pra ver
+     que existe, apagada pra não competir com a que está ativa. */
+  .pill.fosco { opacity: .42; border-style: dashed; }
+  /* O botão do modo que JÁ está ativo não faz nada ao ser tocado (ele não
+     recebe data-action), então também não finge que é clicável. */
+  .pill.inerte { cursor: default; }
 </style>
 </head>
 <body>
@@ -3753,9 +3759,28 @@
                 '<button data-action="apagar-fachada" data-chave="' + chaveEndereco + '" class="pill" style="background:var(--alert);color:#fff">\ud83d\uddd1\ufe0f</button>'
               : '<button data-action="foto-fachada" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (fachadaPendente ? " ativo-pendente" : "") + '">' +
                 (fachadaPendente ? "\u23f3" : "\u{1F4F7}") + " Fachada</button>") +
+            // Os dois modos ficam lado a lado, sempre: o que está valendo
+            // aceso, o outro apagado mas à vista. Antes era um botão só, que
+            // trocava de texto conforme o modo — dava pra saber em qual você
+            // estava, mas não que existia o outro, nem como voltar, sem tocar
+            // e ver o que acontecia.
+            //
+            // Só o APAGADO leva data-action: tocar no que já está ativo não
+            // faz nada. Antes qualquer toque alternava, e esse botão fica logo
+            // acima do disparador da câmera — um toque errado podia cair na
+            // pergunta de apagar os nomes de quem recebeu.
+            //
+            // A ordem é fixa (um nome / loja por loja) pra cada um ficar
+            // sempre no mesmo lugar, e o par vai separado dos botões de foto
+            // por uma margem, pra o dedo não confundir com a câmera.
             (qtdMesmoNumero > 1
-              ? '<button data-action="alternar-individual" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (lojaPorLoja ? " ativo-entregue" : "") + '">' +
-                (lojaPorLoja ? "\ud83c\udfea Loja por loja" : "\ud83c\udfe2 Um nome pra todos") + "</button>"
+              ? '<span style="display:inline-flex;gap:6px;margin-left:10px">' +
+                '<button class="pill ' + (lojaPorLoja ? "fosco" : "ativo-entregue inerte") + '"' +
+                (lojaPorLoja ? ' data-action="alternar-individual" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '"' : "") +
+                '>\ud83c\udfe2 Um nome pra todos</button>' +
+                '<button class="pill ' + (lojaPorLoja ? "ativo-entregue inerte" : "fosco") + '"' +
+                (lojaPorLoja ? "" : ' data-action="alternar-individual" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '"') +
+                '>\ud83c\udfea Loja por loja</button></span>'
               : "") +
             // Baixar esse endereço na hora, sem esperar o resto da rota — pra
             // quem dá baixa no app da J&T ir processando ao longo do dia. O
