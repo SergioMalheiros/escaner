@@ -1090,6 +1090,10 @@
   // cinza neutro das caixas de rua ainda não cadastrada nas Faixas — de
   // propósito fora da paleta, pra não ser confundido com uma cor de separação.
   var COR_SEM_FAIXA = "#9E9E9E";
+  // Nome de rua usado pros pacotes cujo endereço não deu pra decifrar. Não é
+  // uma rua de verdade, então cai sozinho na caixa cinza do fim da lista —
+  // junto, visível e bipável, em vez de sumir.
+  var RUA_ILEGIVEL = "⚠ ENDEREÇO A CONFERIR";
 
   function coresPadrao() {
     return { par1: "#1E88E5", par2: "#3949AB", impar1: "#FB8C00", impar2: "#6D4C41" };
@@ -1183,11 +1187,28 @@
     ld: "ladeira", ladeira: "ladeira",
     bc: "beco", beco: "beco"
   };
+  // Títulos abreviados no nome da rua. A lista da J&T escreve "Rua Cel Moreira
+  // César" e a Faixas tem "Rua Coronel Moreira Cesar" — é a mesma rua, mas
+  // "cel" e "coronel" são diferentes demais pra qualquer comparação por letra
+  // (4 letras de diferença), então o pacote caía na caixa cinza. Expandir os
+  // dois lados antes de comparar resolve sem afrouxar nada: quem não está
+  // nesta lista continua sendo comparado do jeito que veio.
+  var ABREV_TITULO = {
+    cel: "coronel", dr: "doutor", dra: "doutora", prof: "professor",
+    profa: "professora", pres: "presidente", mal: "marechal", gen: "general",
+    alm: "almirante", cap: "capitao", cmte: "comandante", eng: "engenheiro",
+    visc: "visconde", sto: "santo", sta: "santa", mons: "monsenhor",
+    des: "desembargador", min: "ministro", sen: "senador", dep: "deputado",
+    pe: "padre"
+  };
+  function expandirAbreviacoes(nucleo) {
+    return nucleo.split(" ").map(function (p) { return ABREV_TITULO[p] || p; }).join(" ");
+  }
   function partesRua(s) {
     var t = normalizar(s).replace(/[.,;:'"()\/\\-]/g, " ").replace(/\s+/g, " ").trim();
     var m = t.match(/^([a-z]+)\s+(.*)$/);
-    if (m && TIPOS_RUA[m[1]]) return { tipo: TIPOS_RUA[m[1]], nucleo: m[2].trim() };
-    return { tipo: null, nucleo: t };
+    if (m && TIPOS_RUA[m[1]]) return { tipo: TIPOS_RUA[m[1]], nucleo: expandirAbreviacoes(m[2].trim()) };
+    return { tipo: null, nucleo: expandirAbreviacoes(t) };
   }
   // Nome curto pra tela do bipe: só cor + esse nome, sem número e sem quem
   // recebe (isso já fica detalhado na aba Hoje) — a ideia é decidir pela cor,
@@ -1226,14 +1247,17 @@
   // "Rua Mariz e Barros" deixaria de casar com "Rua Mariz e Barros, Icaraí"
   // por causa da vírgula.
   function ehBorda(ch) { return ch === "" || !/[a-z0-9]/.test(ch); }
-  function contemPalavrasInteiras(texto, alvo) {
-    if (!alvo || alvo.length < 3) return false;
+  function indicePalavrasInteiras(texto, alvo) {
+    if (!alvo || alvo.length < 3) return -1;
     var i = texto.indexOf(alvo);
     while (i !== -1) {
-      if (ehBorda(texto.charAt(i - 1)) && ehBorda(texto.charAt(i + alvo.length))) return true;
+      if (ehBorda(texto.charAt(i - 1)) && ehBorda(texto.charAt(i + alvo.length))) return i;
       i = texto.indexOf(alvo, i + 1);
     }
-    return false;
+    return -1;
+  }
+  function contemPalavrasInteiras(texto, alvo) {
+    return indicePalavrasInteiras(texto, alvo) !== -1;
   }
   // Só vale quando UMA rua cadastrada encaixa. Com duas encaixando eu estaria
   // escolhendo entre ruas de verdade, e mandar o pacote pra rua errada é pior
@@ -3750,6 +3774,12 @@
   // esse número da disputa por "qual é o número de verdade" quanto pra
   // guardar o próprio complemento (a loja/apto) e mostrar pro entregador.
   var IMPJ_COMPL = "(?:apt?o?|apart(?:amento)?|casa|cs|loja|lj|bloco|bl|sala|sl|andar|and|quadra|qd|lote|lt|fundos|sobrado)";
+  // "N16", "nº 16", "no. 16": o número da casa vindo com a abreviação de
+  // "número" colada. Sem reconhecer isso, o "N16" não contava como número e
+  // a busca seguia adiante — no endereço real "Rua Guilherme Geenhalch- lado
+  // par N16 bloco 2 apt 1001" ela ia parar no "2" do BLOCO, e o "N16 bloco"
+  // ainda ficava grudado no nome da rua, que aí não casava mais com a Faixas.
+  var IMPJ_NUM = "(?:n[º°o]?\\.?\\s*)?(\\d{1,5}[A-Za-z]?)";
   // Quantos pacotes com número confiável um CEP precisa ter, dentro de uma
   // rua, antes da faixa aprendida (menor/maior número já visto nele) servir
   // de desconfiômetro. Mesmo cuidado do cepVistos: CEP não pode desconfiar
@@ -3942,6 +3972,11 @@
   // tipo "exceptionCode" só porque tem as letras "cep" no meio.
   function impjPareceCampoCep(chave) {
     var achatado = chave.toLowerCase();
+    // "mailcode" entrou depois de ver o JSON de verdade: a J&T manda o CEP em
+    // receiverMailCode, e como nenhum dos nomes abaixo batia, o app achava
+    // que a lista inteira vinha sem CEP — e tudo que depende dele (o aviso de
+    // CEP estranho, a faixa de número aprendida por rua) nunca saía do lugar.
+    if (achatado.indexOf("mailcode") !== -1 || achatado.indexOf("mail_code") !== -1) return true;
     if (achatado.indexOf("zipcode") !== -1 || achatado.indexOf("postcode") !== -1 || achatado.indexOf("post_code") !== -1) return true;
     var palavras = chave.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase().split("_");
     return palavras.indexOf("cep") !== -1 || palavras.indexOf("zip") !== -1;
@@ -3996,13 +4031,19 @@
       }
       if (!ruaCand && partes.length >= 2) { ruaCand = partes[partes.length - 2]; resto = partes[partes.length - 1]; }
       if (ruaCand) {
-        var mpv = (resto || "").match(/^\s*(\d{1,5}[A-Za-z]?)/);
+        var mpv = (resto || "").match(new RegExp("^\\s*" + IMPJ_NUM));
         if (mpv && impjRuaValida(ruaCand)) return reg(impjPrefixoRua(ruaCand), mpv[1], "pv");
+        // "Bairro;Rua Nome 79 apto 1003": só duas partes, com o número DENTRO
+        // do mesmo pedaço da rua em vez de num pedaço próprio. Antes o nome da
+        // rua era achado aqui e o pacote era descartado mesmo assim, porque o
+        // número era procurado só no pedaço seguinte — que não existe.
+        var mpvJunto = ruaCand.match(new RegExp("^\\s*(" + IMPJ_TIPO + "[^,]*?)[,\\s]+" + IMPJ_NUM + "\\b", "i"));
+        if (mpvJunto && impjRuaValida(mpvJunto[1])) return reg(impjPrefixoRua(mpvJunto[1]), mpvJunto[2], "pv-junto");
       }
     }
 
     if (!impjRuaValida(ruaRaw)) {
-      var mdt = det.match(new RegExp("^\\s*(" + IMPJ_TIPO + "[^,]*?)[,\\s]+(\\d{1,5}[A-Za-z]?)\\b", "i"));
+      var mdt = det.match(new RegExp("^\\s*(" + IMPJ_TIPO + "[^,]*?)[,\\s]+" + IMPJ_NUM + "\\b", "i"));
       if (mdt) return reg(impjPrefixoRua(mdt[1]), mdt[2], "det-tem-rua");
       return reg(null, null, "falhou");
     }
@@ -4097,24 +4138,43 @@
       return r;
     });
 
-    // núcleos de rua já resolvidos nesta mesma lista, usados como âncora pros
-    // poucos endereços que nenhuma das estratégias acima decifrou sozinha
+    // Âncora pros endereços que nenhuma das estratégias acima decifrou: as
+    // ruas que a gente JÁ conhece — as cadastradas em Faixas e as que os
+    // outros pacotes desta mesma lista já resolveram. Se o nome de uma delas
+    // aparece no texto do endereço, o pacote é dela, mesmo que o resto venha
+    // embaralhado.
+    //
+    // Antes isso só valia quando o nome da rua estava no COMEÇO do campo de
+    // detalhe, e o número tinha que vir logo em seguida. Só que a J&T manda
+    // bastante endereço com o bairro na frente ("Icaraí;Rua Mariz e Barros
+    // 114...") ou no meio ("Rua Coronel Moreira César,Icaraí 229..."), e
+    // nesses o resgate não acontecia — o pacote sumia da lista.
     var nucleos = [];
-    registros.forEach(function (r) {
-      if (!r.rua) return;
-      var nuc = r.rua.replace(new RegExp("^" + IMPJ_TIPO + "\\s+", "i"), "").trim();
+    function guardarNucleo(nome) {
+      var nuc = String(nome || "").replace(new RegExp("^" + IMPJ_TIPO + "\\s+", "i"), "").trim();
       if (nuc.length >= 6 && nucleos.indexOf(nuc) === -1) nucleos.push(nuc);
-    });
+    }
+    state.mapaRuas.forEach(function (r) { guardarNucleo(r.nome); });
+    registros.forEach(function (r) { if (r.rua) guardarNucleo(r.rua); });
+    // Mais longo primeiro: entre "Moreira Cesar" e "Coronel Moreira Cesar",
+    // ganha o nome mais específico.
     nucleos.sort(function (a, b) { return b.length - a.length; });
     registros.forEach(function (r) {
       if (r.rua && r.numero) return;
-      var alvo = normalizar(r.detRaw || "");
+      var bruto = [r.ruaRaw, r.detRaw].filter(Boolean).join(" ");
+      var alvo = normalizar(bruto);
       for (var i = 0; i < nucleos.length; i++) {
         var nu = nucleos[i], nuS = normalizar(nu);
-        if (alvo.indexOf(nuS) !== 0) continue;
-        var resto = (r.detRaw || "").slice(nu.length).trim();
-        var m = resto.match(/^\s*(\d{1,5}[A-Za-z]?)/);
-        if (m) { r.rua = impjPrefixoRua(nu); r.numero = m[1]; r.metodo = "ancorado-nucleo"; }
+        var pos = indicePalavrasInteiras(alvo, nuS);
+        if (pos === -1) continue;
+        // Primeiro número depois do nome da rua que não esteja colado a uma
+        // palavra de complemento (apto/bloco/sala...) — é o número da casa.
+        var depois = impjLimparRuido(alvo.slice(pos + nuS.length));
+        var candidato = null;
+        impjNumerosComContexto(depois).forEach(function (c) {
+          if (candidato === null && !c.comKeyword) candidato = c.valor;
+        });
+        if (candidato) { r.rua = impjPrefixoRua(nu); r.numero = candidato; r.metodo = "ancorado-nucleo"; }
         break;
       }
     });
@@ -4183,6 +4243,20 @@
       if (r.rua && !r.numero) { r.numero = "S/N"; r.semNumero = true; }
     });
 
+    // REGRA: pacote nenhum some da lista. Endereço que nem as âncoras acima
+    // decifraram entra assim mesmo, numa caixa própria, com o texto cru do
+    // endereço à vista pra resolver na mão. Antes esses eram descartados com
+    // um aviso — e um pacote fora da lista é um pacote que ninguém bipa,
+    // ninguém fotografa e ninguém percebe que faltou.
+    registros.forEach(function (r) {
+      if (r.rua) return;
+      r.rua = RUA_ILEGIVEL;
+      r.numero = "S/N";
+      r.enderecoIlegivel = true;
+      r.enderecoCru = [r.ruaRaw, r.streetnumRaw, r.detRaw]
+        .filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+    });
+
     var completos = registros.filter(function (r) { return r.rua && r.numero; });
     var falhas = registros.filter(function (r) { return !(r.rua && r.numero); });
 
@@ -4192,6 +4266,7 @@
     var texto = completos.map(function (r) {
       var nome = (r.nome || "").replace(/\s+/g, " ").trim();
       var notas = [];
+      if (r.enderecoIlegivel) notas.push("ENDEREÇO NÃO IDENTIFICADO — conferir na etiqueta: " + (r.enderecoCru || "(veio em branco)"));
       if (r.semNumero) notas.push("SEM NÚMERO — usar a loja/referência ao lado");
       if (r.complemento) notas.push(r.complemento);
       if (r.foraDaFaixa) notas.push("conferir número — fora da faixa cadastrada");
@@ -4223,6 +4298,8 @@
       abnormais: completos.filter(function (r) { return r.abnormal; }),
       semNumero: completos.filter(function (r) { return r.semNumero; }),
       semCodigo: completos.filter(function (r) { return !r.codigo; }),
+      enderecoIlegivel: completos.filter(function (r) { return r.enderecoIlegivel; }),
+      ancorados: completos.filter(function (r) { return r.metodo === "ancorado-nucleo"; }),
       corrigidosPorFaixa: completos.filter(function (r) { return r.metodo.indexOf("+corrigido-faixa") !== -1; }),
       foraDaFaixa: completos.filter(function (r) { return r.foraDaFaixa; }),
       foraDaFaixaCep: completos.filter(function (r) { return r.foraDaFaixaCep; }),
@@ -4268,7 +4345,18 @@
     if (!r.total) { alert("Nenhum pacote saiu com endereço completo. Confira se colou o JSON certo."); return; }
 
     var avisos = [];
+    // r.falhas só existe agora se algo escapar de todas as redes acima — o
+    // caminho normal do endereço indecifrável é entrar na lista marcado
+    // (enderecoIlegivel), nunca ficar de fora.
     if (r.falhas.length) avisos.push(r.falhas.length + " pacote(s) não deu pra ler o endereço — ficaram de fora: " + r.falhas.map(function (f) { return f.codigo; }).join(", "));
+    if (r.enderecoIlegivel.length) {
+      avisos.push("ATENÇÃO: " + r.enderecoIlegivel.length + " pacote(s) com endereço que não deu pra decifrar. NENHUM ficou de fora — todos estão na lista, na caixa cinza \"" + RUA_ILEGIVEL + "\" no fim, com o endereço cru à vista pra conferir na etiqueta: " +
+        r.enderecoIlegivel.map(function (f) { return f.codigo + " (" + (f.enderecoCru || "endereço em branco") + ")"; }).join(" · "));
+    }
+    if (r.ancorados.length) {
+      avisos.push(r.ancorados.length + " endereço(s) vieram embaralhados e foram resolvidos pelo nome da rua reconhecido no meio do texto (Faixas + as ruas desta lista): " +
+        r.ancorados.map(function (f) { return f.rua + " " + f.numero + " (" + f.codigo + ")"; }).join(" · "));
+    }
     if (r.gruposMultiPeca.length) {
       avisos.push(r.gruposMultiPeca.length + " pedido(s) com mais de uma peça (código com sufixo -001, -002...): " +
         r.gruposMultiPeca.map(function (g) { return g[0].nome + " (" + g.length + " peças, " + g[0].rua + " " + g[0].numero + ")"; }).join(" · "));
