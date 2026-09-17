@@ -2410,7 +2410,21 @@
     var novo = String(state.pinForm.novo || "").trim();
     if (!PIN_FORMATO.test(novo)) { alert("O PIN novo tem que ser exatamente 4 dígitos (só números)."); return; }
     var chaveRota = sanitizarChaveFirebase(state.minhaRota);
-    var confere = state.pinRota ? conferirPin(atual) : Promise.resolve(true);
+    // Busca o PIN na nuvem SEMPRE, antes de decidir. Aqui havia
+    // "state.pinRota ? conferirPin(atual) : Promise.resolve(true)", e o
+    // "senão" abria um buraco: a leitura do PIN na abertura do app é
+    // assíncrona, então por um instante state.pinRota ainda está vazio — e
+    // nesse intervalo a troca passava SEM conferir o PIN atual. Bastava um
+    // aparelho ainda dentro das 24h abrir a aba Faixas e trocar o PIN sem
+    // conhecer o antigo, trancando a equipe inteira pra fora: exatamente o
+    // que o vencimento de 24h existe pra impedir. Sem internet a leitura
+    // estoura o prazo e cai no catch — não troca, e avisa.
+    var confere = lerPinDaRota(chaveRota).then(function (pin) {
+      state.pinRota = pin;
+      // rota que realmente nunca teve PIN: não há PIN atual pra conferir
+      if (!pin) return true;
+      return conferirPin(atual);
+    });
     confere.then(function (ok) {
       if (!ok) { alert("O PIN atual está errado. Nada foi alterado."); return; }
       return gravarPinDaRota(chaveRota, novo).then(function () {
