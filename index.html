@@ -3780,6 +3780,12 @@
   // par N16 bloco 2 apt 1001" ela ia parar no "2" do BLOCO, e o "N16 bloco"
   // ainda ficava grudado no nome da rua, que aí não casava mais com a Faixas.
   var IMPJ_NUM = "(?:n[º°o]?\\.?\\s*)?(\\d{1,5}[A-Za-z]?)";
+  // As palavras de complemento que vêm DEPOIS do número do prédio ("16 bloco
+  // 2", "90 apto 502") — só com essas dá pra dizer que o número que veio antes
+  // é o do prédio. "andar" fica de fora de propósito: em "12 andar Sala 1222"
+  // o 12 é o ANDAR, o número pertence à palavra e não ao endereço. Ali o
+  // número do prédio é o 229 que está no campo da rua.
+  var IMPJ_COMPL_DEPOIS = "(?:apt?o?|apart(?:amento)?|casa|cs|loja|lj|bloco|bl|sala|sl|quadra|qd|lote|lt|fundos|sobrado)";
   // Quantos pacotes com número confiável um CEP precisa ter, dentro de uma
   // rua, antes da faixa aprendida (menor/maior número já visto nele) servir
   // de desconfiômetro. Mesmo cuidado do cepVistos: CEP não pode desconfiar
@@ -4007,10 +4013,35 @@
   function impjNumeroDoCampo(bruto) {
     var limpo = impjNumeroValido(bruto);
     if (limpo) return limpo;
+    var texto = String(bruto == null ? "" : bruto).trim();
     // "42," / "252," / "264 /304": o número do prédio vem primeiro, grudado
     // na pontuação que separava ele do resto do endereço.
-    var m = String(bruto == null ? "" : bruto).match(/^\s*(\d{1,5}[A-Za-z]?)\s*[,.;\/-]/);
+    var m = texto.match(/^\s*(\d{1,5}[A-Za-z]?)\s*[,.;\/-]/);
     return m ? m[1] : null;
+  }
+  // "90 apto 502", "N16 bloco 2 apt 1001": o campo trouxe o número E o
+  // complemento no mesmo lugar, separados só por espaço. O número do prédio é
+  // o que vem ANTES da palavra de complemento. Sem ler isso, o campo era
+  // descartado inteiro e a busca no texto terminava pegando o número do
+  // APARTAMENTO — o pacote ia parar na faixa errada da rua.
+  function impjNumeroAntesDoComplemento(bruto) {
+    var m = String(bruto == null ? "" : bruto).trim()
+      .match(new RegExp("^" + IMPJ_NUM + "\\s*[,.;\\/-]?\\s*" + IMPJ_COMPL_DEPOIS + "\\b", "i"));
+    return m ? m[1] : null;
+  }
+  // O detalhe da J&T é a junção "campo da rua + campo do número + campo do
+  // complemento". Quando o pedaço que sobra depois da rua e do número é só um
+  // número solto, quem comprou preencheu os dois campos TROCADOS: o do número
+  // ficou com o apartamento e o do complemento ficou com o número do prédio.
+  // Os próprios dados provam: campo de número "Apartamento 902", sobra 173,
+  // numa rua cujo campo diz "de 145 a 191" — o 173 cabe na faixa, o 902 não.
+  // Aqui isso serve de freio: com sobra dessas, o campo do número não manda.
+  function impjNumeroDoComplemento(ruaRaw, numRaw, det) {
+    if (!numRaw || !det) return null;
+    var prefixo = String(ruaRaw + " " + numRaw).replace(/\s+/g, " ").trim();
+    var inteiro = String(det).replace(/\s+/g, " ").trim();
+    if (!prefixo || inteiro.indexOf(prefixo) !== 0) return null;
+    return impjNumeroValido(inteiro.slice(prefixo.length).trim());
   }
   // O campo trouxe complemento em vez de número ("Apto 307"). Não serve como
   // número, mas serve como aviso: esse valor NÃO é o número do prédio.
@@ -4062,6 +4093,13 @@
     // uma marcação explícita de complemento no texto — "Apartamento 603" no
     // detalhe manda mais do que um "603" solto no campo da rua.
     var numeroDaPlataforma = impjNumeroDoCampo(numRaw);
+    // Campo de número sujo ("90 apto 502"): o número do prédio é o que vem
+    // antes do complemento — mas só quando o campo do complemento não trouxe
+    // um número solto, porque aí é LÁ que está o número do prédio e quem
+    // resolve é a leitura do texto, mais abaixo.
+    if (!numeroDaPlataforma && !impjNumeroDoComplemento(ruaRaw, numRaw, det)) {
+      numeroDaPlataforma = impjNumeroAntesDoComplemento(numRaw);
+    }
     if (!numeroDaPlataforma && !impjCampoEhComplemento(numRaw)) {
       var ruaSoDigitos = impjNumeroValido(ruaRaw);
       if (ruaSoDigitos && !impjMarcadoComoComplemento(ruaSoDigitos, det)) numeroDaPlataforma = ruaSoDigitos;
@@ -4124,6 +4162,18 @@
 
     var m2 = ruaRaw.match(new RegExp("^(" + IMPJ_TIPO + "[^,]*?)[,\\s]+(\\d{1,5}[A-Za-z]?)\\s*$", "i"));
     if (m2) return reg(impjPrefixoRua(m2[1]), m2[2], "rua+num");
+
+    // "Rua Osvaldo Cruz,56,Apto 704": o detalhe é o endereço INTEIRO escrito
+    // em campos separados por vírgula, na ordem rua, número, complemento — é
+    // como a maioria das plataformas de compra monta a linha de endereço.
+    // Lendo essa ordem o número é o do prédio; sem ela, o "det-fim" logo
+    // abaixo pegava o último número do texto, que é sempre o apartamento.
+    // Exige a vírgula depois da rua (é ela que denuncia o formato) e que o
+    // número termine em pontuação, em palavra de complemento ou no fim — um
+    // detalhe solto como "Rua X 702 117" não entra aqui.
+    var mv = det.match(new RegExp(
+      "^\\s*(" + IMPJ_TIPO + "[^,]*?)\\s*,\\s*" + IMPJ_NUM + "\\s*(?:[,.;]|\\s+" + IMPJ_COMPL_DEPOIS + "\\b|$)", "i"));
+    if (mv && impjRuaValida(mv[1])) return reg(impjPrefixoRua(mv[1]), mv[2], "det-rua-num-compl");
 
     var m3 = det.match(/^\s*(\d{1,5}[A-Za-z]?)\b/);
     if (m3) return reg(impjPrefixoRua(ruaRaw), m3[1], "det-inicio");
