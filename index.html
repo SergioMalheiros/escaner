@@ -3995,6 +3995,40 @@
     return null;
   }
 
+  // A plataforma de origem (onde o cliente comprou) tem um campo só pro
+  // número do prédio, e é a melhor informação que existe sobre ele — melhor
+  // do que qualquer palpite tirado do texto. O problema é que quem digita não
+  // respeita o campo: manda "42," (com a vírgula do endereço junto), manda o
+  // complemento ("Apto 307", "bl 2 apt 701", "LOJA 101 RESTAURANTE...") ou
+  // deixa o número cair no campo da RUA ("156", "26"). Como o app exigia um
+  // número limpo, desistia do campo nesses casos e ia adivinhar no texto —
+  // e o palpite caía no número do APARTAMENTO. Aqui esses campos passam a ser
+  // lidos pelo que significam.
+  function impjNumeroDoCampo(bruto) {
+    var limpo = impjNumeroValido(bruto);
+    if (limpo) return limpo;
+    // "42," / "252," / "264 /304": o número do prédio vem primeiro, grudado
+    // na pontuação que separava ele do resto do endereço.
+    var m = String(bruto == null ? "" : bruto).match(/^\s*(\d{1,5}[A-Za-z]?)\s*[,.;\/-]/);
+    return m ? m[1] : null;
+  }
+  // O campo trouxe complemento em vez de número ("Apto 307"). Não serve como
+  // número, mas serve como aviso: esse valor NÃO é o número do prédio.
+  function impjCampoEhComplemento(bruto) {
+    return new RegExp("^\\s*" + IMPJ_COMPL + "\\b", "i").test(String(bruto == null ? "" : bruto).trim());
+  }
+  // O número aparece marcado como complemento em algum lugar do texto
+  // ("Apartamento 603")? Então ele não é o número do prédio, mesmo que tenha
+  // vindo num campo que deveria ser o do número.
+  function impjMarcadoComoComplemento(numero, texto) {
+    if (!numero) return false;
+    var achou = false;
+    impjNumerosComContexto(texto || "").forEach(function (c) {
+      if (c.comKeyword && c.valor === numero) achou = true;
+    });
+    return achou;
+  }
+
   // Extrai rua+número de UM pacote do JSON, tentando várias estratégias na
   // ordem — o endereço da J&T vem consistente na maior parte, mas com um bom
   // tanto de bagunça: campo de rua com o bairro em vez da rua, formato com
@@ -4007,11 +4041,32 @@
     var cep = impjExtrairCep(p);
 
     function reg(rua, numero, metodo) {
+      // Achado o nome da rua, o número que a plataforma informou manda sobre
+      // o que foi garimpado do texto: o texto é onde mora a confusão entre
+      // número e complemento, e o campo é justamente o lugar onde o número
+      // deveria estar. Sem isso, "RUA MARIZ E BARROS 42, 502" (campo dizendo
+      // 42) saía com nº 502 — o apartamento.
+      if (rua && numeroDaPlataforma && numero !== numeroDaPlataforma) {
+        numero = numeroDaPlataforma;
+        metodo += "+num-do-campo";
+      }
       return {
         nome: nome, rua: rua, numero: numero, metodo: metodo, cep: cep,
         ruaRaw: p.receiverStreet, streetnumRaw: p.receiverStreetNum, detRaw: p.receiverDetailedAddress
       };
     }
+
+    // O número dito pela própria plataforma, quando dá pra confiar nele: do
+    // campo do número, ou do campo da rua quando foi lá que ele foi parar
+    // (campo de rua só com dígitos não é nome de rua nenhum). Vale menos que
+    // uma marcação explícita de complemento no texto — "Apartamento 603" no
+    // detalhe manda mais do que um "603" solto no campo da rua.
+    var numeroDaPlataforma = impjNumeroDoCampo(numRaw);
+    if (!numeroDaPlataforma && !impjCampoEhComplemento(numRaw)) {
+      var ruaSoDigitos = impjNumeroValido(ruaRaw);
+      if (ruaSoDigitos && !impjMarcadoComoComplemento(ruaSoDigitos, det)) numeroDaPlataforma = ruaSoDigitos;
+    }
+    if (impjMarcadoComoComplemento(numeroDaPlataforma, det)) numeroDaPlataforma = null;
 
     // campos trocados: rua_raw é só bairro, mas o detalhe traz a rua de
     // verdade e o número já vem certo no campo de número
