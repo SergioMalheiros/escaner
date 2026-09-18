@@ -51,6 +51,17 @@
   .checkbox.done { background: var(--ok); border-color: var(--ok); }
   .nome-separado { color: var(--ok); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
   video { width: 100%; min-height: 240px; object-fit: cover; border-radius: 10px; background: #000; margin-top: 12px; }
+  /* A mira do escaneamento. A caixa existe por dois motivos: segurar a mira
+     por cima do v\u00eddeo, e CORTAR a sombra que escurece o lado de fora \u2014 essa
+     sombra \u00e9 gigante de prop\u00f3sito (9999px) e sem o overflow:hidden ela
+     escureceria a tela inteira. O tamanho e a posi\u00e7\u00e3o da mira saem do JS
+     (MIRA_LARGURA/MIRA_ALTURA), pra o ret\u00e2ngulo desenhado ser exatamente o
+     peda\u00e7o que o leitor recebe \u2014 ver quadroDaMira(). */
+  .caixa-mira { position: relative; margin-top: 12px; border-radius: 10px; overflow: hidden; line-height: 0; }
+  .caixa-mira video { margin-top: 0; border-radius: 0; display: block; }
+  .mira { position: absolute; border: 2px solid rgba(255,255,255,.95); border-radius: 8px;
+          box-shadow: 0 0 0 9999px rgba(0,0,0,.55); pointer-events: none; }
+  .mira i { position: absolute; width: 16px; height: 16px; border: 3px solid var(--ok); }
   /* visor da câmera em lote: bem maior que o da aba de escanear (que só
      precisa enquadrar um código de barras) — aqui é a câmera de verdade,
      tipo abrir a câmera pra mandar foto numa conversa. */
@@ -3197,6 +3208,51 @@
   // E se o de reserva tamb\u00e9m falhar: a 120ms por tentativa, 30 falhas s\u00e3o uns
   // 4 segundos apontando pra etiqueta sem nada acontecer \u2014 hora de avisar.
   var FALHAS_ATE_DESISTIR = 30;
+  // Dizer QUAIS formatos procurar \u00e9 o que mais economiza tempo por quadro:
+  // sem a lista, o leitor tenta todo tipo de c\u00f3digo que conhece. Numa
+  // etiqueta da J&T s\u00f3 aparecem estes dois \u2014 o de barras do rastreio e o QR.
+  // (O de 44 d\u00edgitos da nota fiscal tamb\u00e9m \u00e9 code_128, e segue descartado
+  // depois, em processarCodigoLido.) Medido com a etiqueta de verdade:
+  // 35ms por quadro procurando tudo, 13ms procurando s\u00f3 estes dois.
+  var FORMATOS_LEITOR = ["code_128", "qr_code"];
+  // Quanto do v\u00eddeo a mira ocupa. \u00c9 daqui que saem TANTO o ret\u00e2ngulo
+  // desenhado na tela QUANTO o peda\u00e7o entregue ao leitor \u2014 um n\u00famero s\u00f3, pra
+  // a mira nunca mentir sobre o que est\u00e1 sendo lido.
+  var MIRA_LARGURA = 0.55, MIRA_ALTURA = 0.45;
+
+  function novoDetector(Construtor) {
+    // Se este navegador n\u00e3o aceitar a lista de formatos, vale mais um leitor
+    // lento do que nenhum: sem o try, o throw aqui mataria a c\u00e2mera calada.
+    try { return new Construtor({ formats: FORMATOS_LEITOR }); }
+    catch (e) { return new Construtor(); }
+  }
+
+  // Recorta do quadro da c\u00e2mera s\u00f3 o peda\u00e7o de dentro da mira, em resolu\u00e7\u00e3o
+  // cheia (n\u00e3o reduz nada: s\u00f3 d\u00e1 menos \u00e1rea pro leitor vasculhar). Dois
+  // ganhos: o quadro sai de 35ms pra ~13ms, e o c\u00f3digo do pacote ENCOSTADO AO
+  // LADO deixa de entrar \u2014 antes ele era um dos c\u00f3digos achados no quadro, e
+  // como o app fica com o primeiro da lista, dava pra separar o pacote errado.
+  var lonaMira = null;
+  function quadroDaMira(v) {
+    var vw = v.videoWidth, vh = v.videoHeight, bw = v.clientWidth, bh = v.clientHeight;
+    if (!vw || !vh || !bw || !bh) return null;
+    // O v\u00eddeo est\u00e1 com object-fit:cover, ou seja: ampliado at\u00e9 cobrir a caixa,
+    // com as bordas sobrando pra fora da tela. A mira \u00e9 desenhada sobre a
+    // CAIXA, ent\u00e3o pra achar o peda\u00e7o correspondente no quadro original \u00e9
+    // preciso desfazer essa amplia\u00e7\u00e3o e somar o que ficou cortado.
+    var escala = Math.max(bw / vw, bh / vh);
+    var cortadoX = (vw * escala - bw) / 2, cortadoY = (vh * escala - bh) / 2;
+    var w = bw * MIRA_LARGURA, h = bh * MIRA_ALTURA;
+    var sx = ((bw - w) / 2 + cortadoX) / escala, sy = ((bh - h) / 2 + cortadoY) / escala;
+    var sw = w / escala, sh = h / escala;
+    if (sw < 8 || sh < 8) return null;
+    if (!lonaMira) lonaMira = document.createElement("canvas");
+    lonaMira.width = Math.round(sw); lonaMira.height = Math.round(sh);
+    try {
+      lonaMira.getContext("2d").drawImage(v, sx, sy, sw, sh, 0, 0, lonaMira.width, lonaMira.height);
+    } catch (e) { return null; }
+    return lonaMira;
+  }
   var ARQUIVO_LEITOR = "zxing_reader.wasm";
   var LEITOR_CDN = "https://fastly.jsdelivr.net/npm/zxing-wasm@3.1.3/dist/reader/zxing_reader.wasm";
   var promessaLeitor = null;
@@ -3238,7 +3294,7 @@
     // Come\u00e7a pelo leitor do navegador quando ele existe (\u00e9 o r\u00e1pido, do
     // sistema); sen\u00e3o j\u00e1 entra com o de reserva, que prepararLeitorEComecar
     // deixou pronto.
-    var detector = new (LEITOR_DO_NAVEGADOR || window.BarcodeDetector)();
+    var detector = novoDetector(LEITOR_DO_NAVEGADOR || window.BarcodeDetector);
     var usandoReserva = !LEITOR_DO_NAVEGADOR;
     var trocando = false;
     var falhasSeguidas = 0;
@@ -3265,7 +3321,7 @@
       render();
       prepararLeitor().then(function () {
         if (!streamAtual) return;
-        detector = new window.BarcodeDetector();
+        detector = novoDetector(window.BarcodeDetector);
         usandoReserva = true;
         intervalo = 120;
         falhasSeguidas = 0;
@@ -3295,7 +3351,9 @@
       if (!v || ocupado || agora - ultimaTentativa < intervalo) { requestAnimationFrame(tick); return; }
       ocupado = true;
       ultimaTentativa = agora;
-      detector.detect(v).then(function (codes) {
+      // Sem a mira pronta (o v\u00eddeo ainda n\u00e3o tem tamanho, a aba acabou de
+      // abrir), l\u00ea o quadro inteiro em vez de n\u00e3o ler nada.
+      detector.detect(quadroDaMira(v) || v).then(function (codes) {
         // Quadro sem c\u00f3digo nenhum tamb\u00e9m conta como leitor funcionando: o
         // que se mede aqui \u00e9 o leitor quebrado, n\u00e3o a falta de etiqueta.
         falhasSeguidas = 0;
@@ -3738,7 +3796,20 @@
       html += '<div class="warn-box" style="margin-bottom:8px">' + esc(state.erroLeitor) + "</div>" +
         '<button data-action="tentar-leitor" class="btn-primary" style="margin-bottom:8px">Tentar de novo</button>';
     }
-    html += '<video id="video" playsinline autoplay muted style="display:' + (state.statusCamera === "ativa" ? "block" : "none") + '"></video>';
+    // O v\u00eddeo e a mira v\u00e3o juntos numa caixa: a mira \u00e9 posicionada a partir
+    // das MESMAS constantes que recortam o quadro pro leitor, ent\u00e3o o que
+    // est\u00e1 dentro do ret\u00e2ngulo \u00e9 exatamente o que est\u00e1 sendo lido.
+    var mL = MIRA_LARGURA * 100, mA = MIRA_ALTURA * 100;
+    var cantos = [["left:-3px;top:-3px;border-right:none;border-bottom:none"],
+                  ["right:-3px;top:-3px;border-left:none;border-bottom:none"],
+                  ["left:-3px;bottom:-3px;border-right:none;border-top:none"],
+                  ["right:-3px;bottom:-3px;border-left:none;border-top:none"]];
+    html += '<div class="caixa-mira" style="display:' + (state.statusCamera === "ativa" ? "block" : "none") + '">' +
+      '<video id="video" playsinline autoplay muted></video>' +
+      '<div class="mira" style="left:' + ((100 - mL) / 2) + '%;top:' + ((100 - mA) / 2) + '%;' +
+      'width:' + mL + '%;height:' + mA + '%">' +
+      cantos.map(function (c) { return '<i style="' + c[0] + '"></i>'; }).join("") +
+      '</div></div>';
 
     if (state.resultadoScan) {
       var r = state.resultadoScan;
