@@ -118,6 +118,15 @@
   // trocar de navegador lá não adianta. Quem não tem, usa o leitor extra
   // logo abaixo.
   window.LEITOR_NATIVO = ("BarcodeDetector" in window);
+  // Guarda o leitor do navegador e TIRA ele da janela, pra o leitor de
+  // reserva logo abaixo se instalar tamb\u00e9m. Assim o app fica com os dois na
+  // m\u00e3o e pode trocar de um pro outro em pleno uso. Isso importa porque no
+  // Android o BarcodeDetector EXISTE mas o detect() s\u00f3 funciona depois que o
+  // m\u00f3dulo de leitura do Google Play baixa \u2014 sem ele, toda leitura falha, e
+  // como o erro era engolido a c\u00e2mera ficava aberta lendo nada: sem bipe, sem
+  // aviso, sem nada, at\u00e9 pra c\u00f3digo de rua cadastrada.
+  window.LEITOR_DO_NAVEGADOR = window.BarcodeDetector || null;
+  try { delete window.BarcodeDetector; } catch (e) { window.BarcodeDetector = undefined; }
 </script>
 <!-- Leitor de código de reserva (só entra em ação onde o navegador não tem o
      próprio): barcode-detector 3.2.2 sobre zxing-wasm 3.1.3, ambos MIT.
@@ -3177,12 +3186,28 @@
   // baixado quando alguém abre a câmera num aparelho que precisa — quem está
   // no Android nunca paga esse download.
   var LEITOR_NATIVO = !!window.LEITOR_NATIVO;
+  // O leitor do pr\u00f3prio navegador, posto de lado l\u00e1 no topo do arquivo pra o
+  // de reserva poder se instalar junto. null em quem nunca teve um.
+  var LEITOR_DO_NAVEGADOR = window.LEITOR_DO_NAVEGADOR || null;
+  // Rejei\u00e7\u00f5es seguidas do detect() antes de desistir do leitor do navegador
+  // e passar pro de reserva. Uma falha solta acontece; falhar sempre \u00e9 outra
+  // coisa. Com o leitor nativo tentando a cada quadro, 5 falhas d\u00e3o menos de
+  // um d\u00e9cimo de segundo \u2014 a troca acontece antes de dar pra perceber.
+  var FALHAS_ATE_TROCAR_LEITOR = 5;
+  // E se o de reserva tamb\u00e9m falhar: a 120ms por tentativa, 30 falhas s\u00e3o uns
+  // 4 segundos apontando pra etiqueta sem nada acontecer \u2014 hora de avisar.
+  var FALHAS_ATE_DESISTIR = 30;
   var ARQUIVO_LEITOR = "zxing_reader.wasm";
   var LEITOR_CDN = "https://fastly.jsdelivr.net/npm/zxing-wasm@3.1.3/dist/reader/zxing_reader.wasm";
   var promessaLeitor = null;
 
+  // Prepara o leitor de RESERVA. Antes ela devolvia "pronto" na hora em
+  // aparelho com leitor do navegador, e o de reserva nunca chegava a existir
+  // \u2014 por isso n\u00e3o havia pra onde correr quando o do navegador falhava.
+  // Agora quem decide se precisa dela \u00e9 quem chama: no come\u00e7o da c\u00e2mera s\u00f3
+  // chama quem n\u00e3o tem leitor pr\u00f3prio (Android segue sem baixar o arquivo
+  // pesado), e a troca l\u00e1 embaixo chama quando o do navegador desiste.
   function prepararLeitor() {
-    if (LEITOR_NATIVO) return Promise.resolve();
     if (promessaLeitor) return promessaLeitor;
     if (typeof BarcodeDetectionAPI === "undefined" || !BarcodeDetectionAPI.prepareZXingModule) {
       return Promise.reject(new Error("o leitor extra n\u00e3o veio junto com o app"));
@@ -3210,14 +3235,59 @@
   }
 
   function iniciarLoopLeitura() {
-    var detector = new BarcodeDetector();
+    // Come\u00e7a pelo leitor do navegador quando ele existe (\u00e9 o r\u00e1pido, do
+    // sistema); sen\u00e3o j\u00e1 entra com o de reserva, que prepararLeitorEComecar
+    // deixou pronto.
+    var detector = new (LEITOR_DO_NAVEGADOR || window.BarcodeDetector)();
+    var usandoReserva = !LEITOR_DO_NAVEGADOR;
+    var trocando = false;
+    var falhasSeguidas = 0;
     var ocupado = false;
     var ultimaTentativa = 0;
     // O leitor nativo é barato e pode tentar a cada quadro. O de reserva roda
     // em WebAssembly e leva algumas dezenas de milissegundos por leitura —
     // sem esse respiro, as tentativas se empilhariam e o celular esquentaria
     // à toa sem ler mais rápido por isso.
-    var intervalo = LEITOR_NATIVO ? 0 : 120;
+    var intervalo = usandoReserva ? 120 : 0;
+
+    // O detect() do navegador falhar N vezes seguidas n\u00e3o \u00e9 azar: \u00e9 o
+    // sintoma do leitor que existe mas n\u00e3o funciona (m\u00f3dulo do Google Play
+    // que n\u00e3o baixou, aparelho sem internet na primeira vez). Antes esse erro
+    // era engolido e a c\u00e2mera ficava aberta lendo nada pra sempre \u2014 nem
+    // c\u00f3digo de rua cadastrada passava, sem bipe e sem aviso. Agora o app
+    // troca pro leitor de reserva, que \u00e9 o mesmo que o iPhone usa e vem
+    // publicado junto do app.
+    function trocarPraReserva() {
+      if (trocando || usandoReserva) return;
+      trocando = true;
+      state.statusLeitor = "carregando";
+      state.erroLeitor = "";
+      render();
+      prepararLeitor().then(function () {
+        if (!streamAtual) return;
+        detector = new window.BarcodeDetector();
+        usandoReserva = true;
+        intervalo = 120;
+        falhasSeguidas = 0;
+        state.statusLeitor = "pronto";
+        render();
+      }).catch(function () {
+        avisarLeitorMorto();
+      }).then(function () { trocando = false; });
+    }
+
+    // Os DOIS leitores falhando \u00e9 o fim da linha pra c\u00e2mera deste aparelho.
+    // O que n\u00e3o pode \u00e9 ficar calado: o pacote continua separ\u00e1vel na m\u00e3o, na
+    // aba Hoje, e quem est\u00e1 no galp\u00e3o precisa saber disso em vez de apontar a
+    // c\u00e2mera pra etiqueta achando que ela vai pegar a qualquer momento.
+    function avisarLeitorMorto() {
+      if (state.statusLeitor === "erro") return;
+      state.statusLeitor = "erro";
+      state.erroLeitor = "a c\u00e2mera abriu, mas o leitor de c\u00f3digo deste aparelho n\u00e3o est\u00e1 " +
+        "conseguindo ler. D\u00e1 pra separar marcando na m\u00e3o na aba \"Hoje\" enquanto isso.";
+      render();
+    }
+
     function tick() {
       if (!streamAtual) return;
       var v = document.getElementById("video");
@@ -3226,8 +3296,15 @@
       ocupado = true;
       ultimaTentativa = agora;
       detector.detect(v).then(function (codes) {
+        // Quadro sem c\u00f3digo nenhum tamb\u00e9m conta como leitor funcionando: o
+        // que se mede aqui \u00e9 o leitor quebrado, n\u00e3o a falta de etiqueta.
+        falhasSeguidas = 0;
         if (codes.length > 0) processarCodigoLido(codes[0].rawValue);
-      }).catch(function () {}).then(function () {
+      }).catch(function () {
+        falhasSeguidas++;
+        if (!usandoReserva && falhasSeguidas >= FALHAS_ATE_TROCAR_LEITOR) trocarPraReserva();
+        else if (usandoReserva && falhasSeguidas >= FALHAS_ATE_DESISTIR) avisarLeitorMorto();
+      }).then(function () {
         ocupado = false;
         requestAnimationFrame(tick);
       });
@@ -3237,7 +3314,7 @@
 
   function prepararLeitorEComecar() {
     if (!LEITOR_NATIVO) { state.statusLeitor = "carregando"; state.erroLeitor = ""; render(); }
-    prepararLeitor().then(function () {
+    (LEITOR_NATIVO ? Promise.resolve() : prepararLeitor()).then(function () {
       if (!streamAtual) return;
       state.statusLeitor = "pronto";
       state.erroLeitor = "";
