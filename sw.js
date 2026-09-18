@@ -71,9 +71,20 @@ self.addEventListener("activate", function (evento) {
 // nova; com sinal ruim ele abre instantâneo em vez de ficar pendurado numa
 // tela branca. O download que estourou o tempo continua em segundo plano e
 // atualiza o cache pra próxima abertura de qualquer jeito.
+// Resposta que chegou depois de um REDIRECIONAMENTO não serve como página do
+// app. É o portal de Wi-Fi do galpão (aquele "aceite para conectar"): ele
+// responde 200, mas o conteúdo é a página dele, não o app. Guardar isso era
+// ruim duas vezes — o app abria mostrando a tela do portal, e devolver uma
+// resposta redirecionada numa NAVEGAÇÃO é recusado pelo navegador, então o
+// app deixava de abrir offline, que é justamente pra isso que o service
+// worker existe (subsolo, elevador, portaria sem sinal).
+function serveComoPagina(resp) {
+  return !!resp && resp.ok && !resp.redirected;
+}
+
 function responderNavegacao(req, cache) {
   var daRede = fetch(req).then(function (resp) {
-    if (resp && resp.ok) cache.put(PAGINA, resp.clone()).catch(function () {});
+    if (serveComoPagina(resp)) cache.put(PAGINA, resp.clone()).catch(function () {});
     return resp;
   });
   var prazo = new Promise(function (resolve) { setTimeout(function () { resolve(null); }, 2500); });
@@ -81,6 +92,14 @@ function responderNavegacao(req, cache) {
     .then(function (resp) {
       if (resp) return resp;
       return cache.match(PAGINA).then(function (guardado) {
+        // Uma versão anterior deste service worker pode ter guardado a página
+        // do portal antes da checagem acima existir. Se o que está guardado
+        // não serve, joga fora e deixa a rede responder — melhor esperar do
+        // que abrir a tela errada ou estourar na navegação.
+        if (guardado && !serveComoPagina(guardado)) {
+          cache.delete(PAGINA).catch(function () {});
+          guardado = null;
+        }
         // Sem nada guardado ainda (primeiríssima abertura, offline): não tem o
         // que inventar, devolve o que a rede acabar dizendo.
         return guardado || daRede;

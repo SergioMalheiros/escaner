@@ -3079,6 +3079,33 @@
     }, 800);
   }
 
+  // Tem cara de c\u00f3digo de rastreio? Mesma regra que processarCodigoLido usa
+  // pra decidir se segue adiante \u2014 aqui ela serve pra ESCOLHER, entre v\u00e1rios
+  // c\u00f3digos vistos no mesmo quadro, qual deles \u00e9 o do pacote.
+  function codigoDeRastreio(bruto) {
+    var c = String(bruto == null ? "" : bruto).trim();
+    if (/^\d{44}$/.test(c)) return false;   // chave da nota fiscal, nunca \u00e9 rastreio
+    return FORMATO_CODIGO.test(c);
+  }
+
+  // A etiqueta traz MAIS DE UM c\u00f3digo: o QR (que costuma ser um link), o de
+  // barras do rastreio e o de 44 d\u00edgitos da nota fiscal. O leitor devolve
+  // todos de uma vez, em ordem que ele decide \u2014 e o app olhava S\u00d3 O
+  // PRIMEIRO. Quando o primeiro era o QR do link, ele era descartado calado e
+  // o rastreio, que estava logo ali na mesma lista, nunca era olhado: a
+  // c\u00e2mera parecia morta com a etiqueta na frente dela.
+  //
+  // Agora procura na lista inteira o primeiro que tenha forma de rastreio. Se
+  // nenhum tiver (s\u00f3 o QR do link e a nota fiscal, por exemplo), segue quieto
+  // como antes \u2014 \u00e9 o caso de a etiqueta ainda n\u00e3o ter entrado direito na
+  // mira, e um aviso a cada quadro s\u00f3 atrapalharia.
+  function processarLeitura(codes) {
+    for (var i = 0; i < codes.length; i++) {
+      var bruto = codes[i] && codes[i].rawValue;
+      if (codigoDeRastreio(bruto)) { processarCodigoLido(bruto); return; }
+    }
+  }
+
   function processarCodigoLido(codigo) {
     // As etiquetas da J&T costumam trazer mais de um código: o de rastreio
     // (sempre 15 dígitos, é o que interessa pra separação) e, em baixo, o
@@ -3357,7 +3384,7 @@
         // Quadro sem c\u00f3digo nenhum tamb\u00e9m conta como leitor funcionando: o
         // que se mede aqui \u00e9 o leitor quebrado, n\u00e3o a falta de etiqueta.
         falhasSeguidas = 0;
-        if (codes.length > 0) processarCodigoLido(codes[0].rawValue);
+        if (codes.length > 0) processarLeitura(codes);
       }).catch(function () {
         falhasSeguidas++;
         if (!usandoReserva && falhasSeguidas >= FALHAS_ATE_TROCAR_LEITOR) trocarPraReserva();
