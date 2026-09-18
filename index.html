@@ -3037,6 +3037,18 @@
   // o próximo escaneamento; cada novo escaneamento reinicia a contagem, então
   // nunca some "cedo demais" por causa de um flash anterior ainda correndo.
   var flashTimeoutId = null;
+  // O r\u00f3tulo do flash cinza \u00e9 o mesmo da caixa onde o pacote foi parar na
+  // aba Hoje, pra piscar na tela exatamente a palavra que ele vai procurar
+  // na lista. "CONFERIR" \u00e9 o \u00fanico que encurta: a caixa se chama
+  // "\u26a0 ENDERE\u00c7O A CONFERIR" e isso n\u00e3o cabe em letra de flash.
+  function flashSemCor(r) {
+    var motivo = r && r.motivo;
+    return {
+      cor: COR_SEM_FAIXA,
+      label: motivo === "sem-numero" ? "SEM N\u00ba" : (motivo === "ilegivel" ? "CONFERIR" : "SEM FAIXA")
+    };
+  }
+
   function agendarFlashScan(classificacao, rua) {
     if (flashTimeoutId) clearTimeout(flashTimeoutId);
     state.flashScan = { cor: classificacao.cor, label: classificacao.label, rua: rua };
@@ -3146,7 +3158,13 @@
         : (linha.rua === RUA_ILEGIVEL ? "ilegivel" : (!ruaMatch ? "sem-faixa" : "sem-numero"))
     };
     tocarBipeSucesso();
+    // O flash \u00e9 o que se v\u00ea de canto de olho separando r\u00e1pido. Sem cor
+    // cadastrada n\u00e3o d\u00e1 pra mostrar cor nenhuma \u2014 mas o pacote foi lido e
+    // separado, e ficar SEM flash parecia que a c\u00e2mera n\u00e3o tinha pegado.
+    // Ent\u00e3o flasha no mesmo cinza das caixas cinzas, com o mesmo r\u00f3tulo
+    // delas: o que pisca na tela \u00e9 o nome da caixa onde procurar o pacote.
     if (classificacao) agendarFlashScan(classificacao, linha.rua);
+    else agendarFlashScan(flashSemCor(state.resultadoScan), state.resultadoScan.motivo === "ilegivel" ? "" : linha.rua);
     marcarSeparado(linha.id, true);
   }
 
