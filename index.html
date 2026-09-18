@@ -3235,6 +3235,16 @@
   // E se o de reserva tamb\u00e9m falhar: a 120ms por tentativa, 30 falhas s\u00e3o uns
   // 4 segundos apontando pra etiqueta sem nada acontecer \u2014 hora de avisar.
   var FALHAS_ATE_DESISTIR = 30;
+  // Quantos quadros seguidos sem a mira pronta antes de desistir dela e ler o
+  // quadro inteiro. Cada render recria o <video>, que fica alguns
+  // milissegundos sem tamanho — nesses quadros o recorte n\u00e3o d\u00e1 pra fazer.
+  // O normal \u00e9 1 ou 2; um n\u00famero bem maior aqui s\u00f3 serve pra garantir que uma
+  // mira que nunca fique pronta n\u00e3o deixe a c\u00e2mera sem ler nada.
+  var QUADROS_SEM_MIRA_ATE_DESISTIR = 60;
+  // Cada chamada de iniciarLoopLeitura() ganha um n\u00famero. S\u00f3 o la\u00e7o com o
+  // n\u00famero mais alto continua rodando: assim come\u00e7ar um la\u00e7o novo encerra o
+  // anterior, em vez de os dois ficarem girando juntos.
+  var geracaoLeitura = 0;
   // Dizer QUAIS formatos procurar \u00e9 o que mais economiza tempo por quadro:
   // sem a lista, o leitor tenta todo tipo de c\u00f3digo que conhece. Numa
   // etiqueta da J&T s\u00f3 aparecem estes dois \u2014 o de barras do rastreio e o QR.
@@ -3318,12 +3328,20 @@
   }
 
   function iniciarLoopLeitura() {
+    // "Tentar de novo" (e qualquer outro caminho que recome\u00e7ava a leitura)
+    // chamava esta fun\u00e7\u00e3o sem encerrar o la\u00e7o que j\u00e1 estava rodando: cada
+    // clique somava mais um la\u00e7o permanente, todos disputando a mesma c\u00e2mera
+    // e gastando bateria at\u00e9 a c\u00e2mera fechar. Agora o la\u00e7o novo toma o lugar
+    // do antigo, que se encerra sozinho no pr\u00f3ximo quadro.
+    var minhaGeracao = ++geracaoLeitura;
     // Come\u00e7a pelo leitor do navegador quando ele existe (\u00e9 o r\u00e1pido, do
     // sistema); sen\u00e3o j\u00e1 entra com o de reserva, que prepararLeitorEComecar
     // deixou pronto.
     var detector = novoDetector(LEITOR_DO_NAVEGADOR || window.BarcodeDetector);
+    var semMira = 0;
     var usandoReserva = !LEITOR_DO_NAVEGADOR;
     var trocando = false;
+    var tentouReserva = false;
     var falhasSeguidas = 0;
     var ocupado = false;
     var ultimaTentativa = 0;
@@ -3341,7 +3359,13 @@
     // troca pro leitor de reserva, que \u00e9 o mesmo que o iPhone usa e vem
     // publicado junto do app.
     function trocarPraReserva() {
-      if (trocando || usandoReserva) return;
+      // Uma vez s\u00f3. A troca come\u00e7a pondo statusLeitor em "carregando", o que
+      // limpava a trava do avisarLeitorMorto: com os DOIS leitores mortos o
+      // app entrava num vai-e-vem de "carregando" e "erro", re-desenhando a
+      // tela a cada volta e gastando bateria \u00e0 toa. Falhou uma vez, n\u00e3o
+      // adianta insistir \u2014 quem insiste \u00e9 o bot\u00e3o "Tentar de novo".
+      if (trocando || usandoReserva || tentouReserva) return;
+      tentouReserva = true;
       trocando = true;
       state.statusLeitor = "carregando";
       state.erroLeitor = "";
@@ -3372,23 +3396,30 @@
     }
 
     function tick() {
-      if (!streamAtual) return;
+      if (!streamAtual || minhaGeracao !== geracaoLeitura) return;
       var v = document.getElementById("video");
       var agora = Date.now();
       if (!v || ocupado || agora - ultimaTentativa < intervalo) { requestAnimationFrame(tick); return; }
+      // O <video> \u00e9 recriado a cada render (depois de cada bipe, de cada
+      // flash, de cada aviso da nuvem) e fica uns milissegundos sem tamanho.
+      // Nesses quadros n\u00e3o d\u00e1 pra recortar a mira \u2014 e ler o QUADRO INTEIRO
+      // ali \u00e9 exatamente o que a mira existe pra impedir: era por essa fresta
+      // que o c\u00f3digo do pacote encostado ao lado podia entrar. Melhor pular o
+      // quadro: s\u00e3o 1 ou 2 de cada vez, ningu\u00e9m percebe.
+      var alvo = quadroDaMira(v);
+      if (alvo) semMira = 0;
+      else if (++semMira < QUADROS_SEM_MIRA_ATE_DESISTIR) { requestAnimationFrame(tick); return; }
       ocupado = true;
       ultimaTentativa = agora;
-      // Sem a mira pronta (o v\u00eddeo ainda n\u00e3o tem tamanho, a aba acabou de
-      // abrir), l\u00ea o quadro inteiro em vez de n\u00e3o ler nada.
-      detector.detect(quadroDaMira(v) || v).then(function (codes) {
+      detector.detect(alvo || v).then(function (codes) {
         // Quadro sem c\u00f3digo nenhum tamb\u00e9m conta como leitor funcionando: o
         // que se mede aqui \u00e9 o leitor quebrado, n\u00e3o a falta de etiqueta.
         falhasSeguidas = 0;
         if (codes.length > 0) processarLeitura(codes);
       }).catch(function () {
         falhasSeguidas++;
-        if (!usandoReserva && falhasSeguidas >= FALHAS_ATE_TROCAR_LEITOR) trocarPraReserva();
-        else if (usandoReserva && falhasSeguidas >= FALHAS_ATE_DESISTIR) avisarLeitorMorto();
+        if (!usandoReserva && !tentouReserva && falhasSeguidas >= FALHAS_ATE_TROCAR_LEITOR) trocarPraReserva();
+        else if (falhasSeguidas >= FALHAS_ATE_DESISTIR) avisarLeitorMorto();
       }).then(function () {
         ocupado = false;
         requestAnimationFrame(tick);
